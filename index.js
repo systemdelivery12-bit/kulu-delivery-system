@@ -3,7 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const helmet = require('helmet');
-const pool = require('./db/pool');
+const pool = require('./db/pool'); // keep if you want, not used yet but we'll need later
+
+const authRoutes = require('./routes/authRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,19 +15,16 @@ app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 
-// Health check
+// Routes
 app.get('/api/v1/health', (req, res) => {
   res.json({ success: true, message: 'Kulu Delivery API is running!' });
 });
 
-// Database test (remove after testing)
-app.get('/api/v1/db-test', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ success: true, time: result.rows[0].now });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.use('/api/v1/auth', authRoutes);
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Endpoint not found' } });
 });
 
 app.listen(PORT, () => {
