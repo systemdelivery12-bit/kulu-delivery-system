@@ -21,7 +21,9 @@ const adminDashboardRoutes = require('./routes/adminDashboard');
 app.use('/api/v1/admin/dashboard', adminDashboardRoutes);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;const driverRoutes = require('./routes/driver');
+// ...
+app.use('/api/v1/driver', driverRoutes);
 
 app.use(helmet());
 app.use(cors());
