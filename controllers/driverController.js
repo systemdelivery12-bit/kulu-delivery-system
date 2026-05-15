@@ -1,8 +1,11 @@
 // controllers/driverController.js
 const pool = require('../db/pool');
 
-// Utility: get driver profile from req.user
+// Utility: get driver ID from authenticated request
 const getDriverId = (req) => req.user.userId;
+
+// Helper to get Socket.io instance for real-time emissions
+const getIO = (req) => req.app.get('io');
 
 // PUT /driver/status  (toggle online/offline)
 exports.toggleOnline = async (req, res) => {
@@ -37,9 +40,8 @@ exports.getAssignments = async (req, res) => {
       [driverId]
     );
 
-    // For each assignment, fetch order details (customer, items)
+    // Enhance each assignment with order details and earnings
     for (let asgn of assignments.rows) {
-      // Get unique order ids from assignment_items -> order_items -> order_id
       const orderIdsRes = await pool.query(
         `SELECT DISTINCT oi.order_id
          FROM assignment_items ai
@@ -49,7 +51,7 @@ exports.getAssignments = async (req, res) => {
       );
       const orderIds = orderIdsRes.rows.map(r => r.order_id);
       asgn.orderIds = orderIds;
-      // Fetch basic order info (customer name, zone, total)
+      
       if (orderIds.length > 0) {
         const ordersRes = await pool.query(
           `SELECT o.id, o.delivery_fee, o.total_amount, u.full_name as customer_name, z.name_tig as zone_name
@@ -60,7 +62,6 @@ exports.getAssignments = async (req, res) => {
           [orderIds]
         );
         asgn.orders = ordersRes.rows;
-        // Compute total earnings for this assignment (sum of delivery_fee)
         asgn.earnings = ordersRes.rows.reduce((sum, o) => sum + parseFloat(o.delivery_fee), 0);
       } else {
         asgn.orders = [];
@@ -77,7 +78,7 @@ exports.getAssignments = async (req, res) => {
 // PUT /driver/assignments/:id/respond  (accept or reject)
 exports.respondToAssignment = async (req, res) => {
   const driverId = getDriverId(req);
-  const { id } = req.params; // assignment id
+  const { id } = req.params;
   const { response } = req.body; // 'accept' or 'reject'
 
   if (!response || !['accept', 'reject'].includes(response)) {
@@ -88,7 +89,6 @@ exports.respondToAssignment = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Verify assignment belongs to this driver and is pending_accept
     const asgn = await client.query(
       'SELECT * FROM assignments WHERE id = $1 AND driver_id = $2 AND status = $3',
       [id, driverId, 'pending_accept']
@@ -100,14 +100,12 @@ exports.respondToAssignment = async (req, res) => {
 
     if (response === 'accept') {
       await client.query('UPDATE assignments SET status = $1, accepted_at = NOW() WHERE id = $2', ['accepted', id]);
-      // Orders stay in 'assigned' status, driver will start when they update first stop.
       await client.query('COMMIT');
       return res.json({ success: true, message: 'Assignment accepted' });
     } else {
-      // Reject: set assignment to rejected, and revert orders to pending_assignment
+      // Reject: revert assignment and orders
       await client.query('UPDATE assignments SET status = $1 WHERE id = $2', ['rejected', id]);
-
-      // Get all order_ids from this assignment
+      
       const orderIds = await client.query(
         `SELECT DISTINCT oi.order_id
          FROM assignment_items ai
@@ -143,7 +141,6 @@ exports.updateStopStatus = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Verify stop belongs to an assignment of this driver
     const stop = await client.query(
       `SELECT ds.*, a.driver_id, a.status as assign_status
        FROM delivery_stops ds
@@ -160,17 +157,14 @@ exports.updateStopStatus = async (req, res) => {
     const currentStop = stop.rows[0];
     const assignmentId = currentStop.assignment_id;
 
-    // Validate status transition (optional, but we can trust the driver app)
-    // If status is 'picked_up', previous status should be 'arrived'. We won't enforce for MVP.
     await client.query('UPDATE delivery_stops SET status = $1 WHERE id = $2', [status, stopId]);
 
-    // If this stop is the first pickup and we're setting it to 'arrived' or 'picked_up',
-    // move assignment from 'accepted' to 'in_progress' if not already.
+    // Move assignment to in_progress on first stop activity
     if (currentStop.assign_status === 'accepted' && (status === 'arrived' || status === 'picked_up')) {
       await client.query('UPDATE assignments SET status = $1 WHERE id = $2', ['in_progress', assignmentId]);
     }
 
-    // Check if this is the last stop (max sequence) and status is 'delivered' (for a drop)
+    // Check if last stop (max sequence) and delivered
     const maxSeq = await client.query(
       'SELECT MAX(sequence) as max_seq FROM delivery_stops WHERE assignment_id = $1',
       [assignmentId]
@@ -178,10 +172,8 @@ exports.updateStopStatus = async (req, res) => {
     const isLastStop = currentStop.sequence === maxSeq.rows[0].max_seq;
 
     if (isLastStop && currentStop.stop_type === 'drop' && status === 'delivered') {
-      // Complete the assignment and all associated orders
       await client.query('UPDATE assignments SET status = $1, completed_at = NOW() WHERE id = $2', ['completed', assignmentId]);
-
-      // Set all orders in this assignment to 'delivered'
+      
       const orderIds = await client.query(
         `SELECT DISTINCT oi.order_id
          FROM assignment_items ai
@@ -192,8 +184,8 @@ exports.updateStopStatus = async (req, res) => {
       for (let row of orderIds.rows) {
         await client.query("UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = $1", [row.order_id]);
       }
-
-      // Increment driver total deliveries
+      
+      // Increase total deliveries count
       await client.query('UPDATE drivers SET total_deliveries = total_deliveries + 1 WHERE user_id = $1', [driverId]);
     }
 
@@ -207,18 +199,55 @@ exports.updateStopStatus = async (req, res) => {
   }
 };
 
-// POST /driver/location  (GPS ping)
+// POST /driver/location  (GPS ping – also emits via Socket.io)
 exports.sendLocation = async (req, res) => {
   const driverId = getDriverId(req);
   const { lat, lng, assignmentId } = req.body;
   if (lat === undefined || lng === undefined) {
     return res.status(400).json({ success: false, error: { code: 'MISSING_COORDS' } });
   }
+
   try {
+    // Save to database
     await pool.query(
       'INSERT INTO driver_tracking_log (driver_id, assignment_id, lat, lng) VALUES ($1, $2, $3, $4)',
       [driverId, assignmentId || null, lat, lng]
     );
+
+    // Emit real-time event
+    const io = getIO(req);
+    let orderIds = [];
+    if (assignmentId) {
+      const orders = await pool.query(
+        `SELECT DISTINCT oi.order_id
+         FROM assignment_items ai
+         JOIN order_items oi ON ai.order_item_id = oi.id
+         WHERE ai.assignment_id = $1`,
+        [assignmentId]
+      );
+      orderIds = orders.rows.map(r => r.order_id);
+    }
+
+    // Admin room
+    io.to('admin:all').emit('driver:locationUpdate', {
+      driverId,
+      lat,
+      lng,
+      assignmentId,
+      timestamp: new Date()
+    });
+
+    // Customer rooms
+    orderIds.forEach(orderId => {
+      io.to(`order:${orderId}`).emit('driver:locationUpdate', {
+        driverId,
+        lat,
+        lng,
+        assignmentId,
+        timestamp: new Date()
+      });
+    });
+
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: { code: 'LOCATION_FAIL', message: err.message } });
@@ -240,7 +269,6 @@ exports.getEarnings = async (req, res) => {
       dateFilter = 'AND a.completed_at >= date_trunc(\'month\', CURRENT_DATE)';
     }
 
-    // Sum delivery fees from orders delivered by completed assignments
     const result = await pool.query(
       `SELECT COALESCE(SUM(o.delivery_fee), 0) as total_earnings,
               COUNT(DISTINCT a.id) as total_trips
@@ -253,7 +281,6 @@ exports.getEarnings = async (req, res) => {
       [driverId]
     );
 
-    // Get detailed history for the period
     const history = await pool.query(
       `SELECT a.id as assignment_id, a.completed_at, SUM(o.delivery_fee) as earning,
               array_agg(DISTINCT o.id) as order_ids
