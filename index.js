@@ -16,7 +16,7 @@ const io = new Server(server, {
     methods: ['GET', 'POST']
   }
 });
-
+app.use(express.static('public'));
 // Make io accessible to controllers
 app.set('io', io);
 
