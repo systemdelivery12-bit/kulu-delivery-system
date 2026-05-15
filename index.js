@@ -8,11 +8,14 @@ const pool = require('./db/pool'); // keep if you want, not used yet but we'll n
 const adminShopRoutes = require('./routes/adminShops');
 const adminProductRoutes = require('./routes/adminProducts');
 const productRoutes = require('./routes/products');
+const orderRoutes = require('./routes/orders');
 
 const authRoutes = require('./routes/authRoutes');
 app.use('/api/v1/admin/shops', adminShopRoutes);
 app.use('/api/v1/admin/products', adminProductRoutes);
 app.use('/api/v1/products', productRoutes);
+app.use('/api/v1/orders', orderRoutes);
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -37,6 +40,7 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
 
 
 
