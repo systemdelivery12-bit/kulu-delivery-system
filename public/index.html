@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Kulu Delivery - Admin Live Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { margin:0; padding:0; font-family: sans-serif; }
+    #map { height: 100vh; width: 100%; }
+    #login { position: absolute; top:10px; left:10px; z-index:1000; background:white; padding:10px; border-radius:5px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="login">
+    <input type="text" id="token" placeholder="Admin JWT token" size="40">
+    <button onclick="connect()">Connect</button>
+  </div>
+
+  <script>
+    const map = L.map('map').setView([13.49, 39.47], 13); // Mekelle center
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: 'Map data &copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const driversMarkers = {}; // driverId -> marker
+
+    function connect() {
+      const token = document.getElementById('token').value;
+      if (!token) return alert('Enter admin token');
+
+      const socket = io('/', { auth: { token } });
+
+      socket.on('connect', () => {
+        console.log('Connected as admin');
+        // Fetch initial driver locations
+        fetch('/api/v1/admin/dashboard/drivers/locations', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => res.json())
+        .then(json => {
+          if (json.success) {
+            json.data.forEach(driver => {
+              if (driver.lat && driver.lng) {
+                updateOrAddMarker(driver.user_id, driver.lat, driver.lng, driver.full_name, driver.vehicle_type);
+              }
+            });
+          }
+        });
+      });
+
+      // Listen for live updates
+      socket.on('driver:locationUpdate', (data) => {
+        const { driverId, lat, lng } = data;
+        // For simplicity, we just update the marker (name from initial fetch, but we could store names)
+        if (driversMarkers[driverId]) {
+          driversMarkers[driverId].setLatLng([lat, lng]);
+        } else {
+          updateOrAddMarker(driverId, lat, lng, `Driver ${driverId}`, 'unknown');
+        }
+      });
+
+      function updateOrAddMarker(driverId, lat, lng, name, vehicleType) {
+        if (driversMarkers[driverId]) {
+          driversMarkers[driverId].setLatLng([lat, lng]);
+        } else {
+          const icon = vehicleType === 'motorcycle' ? '🏍️' : vehicleType === 'car' ? '🚗' : vehicleType === 'bicycle' ? '🚲' : '🚶';
+          const marker = L.marker([lat, lng])
+            .addTo(map)
+            .bindPopup(`<b>${name}</b><br>${vehicleType}`);
+          driversMarkers[driverId] = marker;
+        }
+      }
+    }
+  </script>
+</body>
+</html>
