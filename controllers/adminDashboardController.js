@@ -1,7 +1,7 @@
 // controllers/adminDashboardController.js
 const pool = require('../db/pool');
 
-// GET /admin/orders/pending – all orders waiting for assignment
+// GET /admin/dashboard/orders/pending
 exports.getPendingOrders = async (req, res) => {
   try {
     const result = await pool.query(
@@ -11,7 +11,6 @@ exports.getPendingOrders = async (req, res) => {
        WHERE o.status = 'pending_assignment'
        ORDER BY o.created_at ASC`
     );
-    // For each order, also fetch its items (optional but helpful)
     const orders = result.rows;
     for (let order of orders) {
       const items = await pool.query(
@@ -29,7 +28,7 @@ exports.getPendingOrders = async (req, res) => {
   }
 };
 
-// GET /admin/drivers/online – drivers currently online
+// GET /admin/dashboard/drivers/online
 exports.getOnlineDrivers = async (req, res) => {
   try {
     const result = await pool.query(
@@ -45,7 +44,7 @@ exports.getOnlineDrivers = async (req, res) => {
   }
 };
 
-// POST /admin/assign – assign one or more orders to a driver
+// POST /admin/dashboard/assign
 exports.assignOrders = async (req, res) => {
   const { driverId, orderIds } = req.body;
   if (!driverId || !orderIds || !orderIds.length) {
@@ -56,7 +55,6 @@ exports.assignOrders = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1. Verify driver exists, is approved and online
     const driver = await client.query(
       'SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true',
       [driverId]
@@ -66,7 +64,6 @@ exports.assignOrders = async (req, res) => {
       return res.status(400).json({ success: false, error: { code: 'DRIVER_NOT_AVAILABLE' } });
     }
 
-    // 2. Verify all orders are in pending_assignment status and fetch their zones
     const orders = [];
     for (const orderId of orderIds) {
       const orderRes = await client.query(
@@ -80,70 +77,49 @@ exports.assignOrders = async (req, res) => {
       orders.push(orderRes.rows[0]);
     }
 
-    // 3. Check driver capacity (max_orders - current load)
     const currentLoad = await client.query(
       'SELECT COUNT(*)::int FROM assignments WHERE driver_id = $1 AND status IN ($2,$3)',
       [driverId, 'accepted', 'in_progress']
     );
-    const load = currentLoad.rows[0].count;
-    if (load + orderIds.length > driver.rows[0].max_orders) {
+    if (currentLoad.rows[0].count + orderIds.length > driver.rows[0].max_orders) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: { code: 'DRIVER_FULL' } });
     }
 
-    // 4. Create one assignment for all these orders
     const assignmentRes = await client.query(
       'INSERT INTO assignments (driver_id, status) VALUES ($1, $2) RETURNING id',
       [driverId, 'pending_accept']
     );
     const assignmentId = assignmentRes.rows[0].id;
 
-    // 5. Link all order items from these orders to the assignment
-    // and gather shops/zones to build route
     const shopIds = new Set();
-    let customerZoneId = null;
-    let customerCoords = null;
-    let customerName = '';
+    // For MVP, we create a single drop per unique zone (handles different customers)
+    const uniqueZones = new Map();
 
     for (const order of orders) {
-      // Update order status
       await client.query('UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2', ['assigned', order.id]);
 
-      // Get order items
       const items = await client.query('SELECT * FROM order_items WHERE order_id = $1', [order.id]);
       for (const item of items.rows) {
         await client.query(
           'INSERT INTO assignment_items (assignment_id, order_item_id) VALUES ($1, $2)',
           [assignmentId, item.id]
         );
-        // Collect unique shops
         shopIds.add(item.shop_id);
       }
 
-      // We'll use the first order's customer info for the drop (all orders should be from same customer? Actually, batching multiple orders from different customers is possible.
-      // For simplicity now, we assume admin groups same-customer orders or we create separate drops per order. Let's design: each order has its own customer and zone.
-      // We'll store the zone IDs of each order to build drops later. Better: we'll just build a drop for each unique customer/zone.
-      // For now, we’ll handle one customer only (if different customers, admin should assign separately – this is MVP).
-      if (!customerZoneId) {
-        customerZoneId = order.delivery_zone_id;
-        const cust = await client.query('SELECT full_name FROM users WHERE id = $1', [order.customer_id]);
-        customerName = cust.rows[0]?.full_name || 'Customer';
-        const zone = await client.query('SELECT coordinates FROM zones WHERE id = $1', [customerZoneId]);
-        customerCoords = zone.rows[0]?.coordinates || null;
-      } else {
-        // For MVP, if multiple different customers, we'll just use the first; later we can split.
-        // You can enhance by creating separate drops per order.
+      if (!uniqueZones.has(order.delivery_zone_id)) {
+        uniqueZones.set(order.delivery_zone_id, order.customer_id);
       }
     }
 
-    // 6. Build delivery_stops: pickups (each unique shop) then drop
+    // Build stops: pickups first (sorted by shop ID), then drops
     let seq = 1;
     const shopRows = await client.query(
       'SELECT id, name_tig, coordinates FROM shops WHERE id = ANY($1)',
       [Array.from(shopIds)]
     );
-    // Sort shops by ID for a predictable route (later admin can reorder)
-    shopRows.rows.sort((a,b) => a.id - b.id);
+    shopRows.rows.sort((a, b) => a.id - b.id);
 
     for (const shop of shopRows.rows) {
       await client.query(
@@ -154,15 +130,6 @@ exports.assignOrders = async (req, res) => {
       seq++;
     }
 
-    // Drop at customer (only one for now, if multiple customers, repeat)
-    // For MVP, we assume all orders go to the same customer or at least same zone. If there are different zones, we would need multiple drops.
-    // Let's handle multiple distinct zones: add a drop for each unique zone in orders.
-    const uniqueZones = new Map();
-    for (const order of orders) {
-      if (!uniqueZones.has(order.delivery_zone_id)) {
-        uniqueZones.set(order.delivery_zone_id, order.customer_id);
-      }
-    }
     for (const [zoneId, custId] of uniqueZones) {
       const zoneCoords = await client.query('SELECT coordinates FROM zones WHERE id = $1', [zoneId]);
       await client.query(
@@ -175,22 +142,13 @@ exports.assignOrders = async (req, res) => {
 
     await client.query('COMMIT');
 
-    // 7. Fetch the complete assignment to return
-    const fullAssignment = await pool.query(
-      'SELECT * FROM assignments WHERE id = $1', [assignmentId]
-    );
-    const stops = await pool.query(
-      'SELECT * FROM delivery_stops WHERE assignment_id = $1 ORDER BY sequence', [assignmentId]
-    );
+    const fullAssignment = await pool.query('SELECT * FROM assignments WHERE id = $1', [assignmentId]);
+    const stops = await pool.query('SELECT * FROM delivery_stops WHERE assignment_id = $1 ORDER BY sequence', [assignmentId]);
 
     res.status(201).json({
       success: true,
-      data: {
-        assignment: fullAssignment.rows[0],
-        stops: stops.rows
-      }
+      data: { assignment: fullAssignment.rows[0], stops: stops.rows }
     });
-
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ success: false, error: { code: 'ASSIGN_FAIL', message: err.message } });
@@ -199,7 +157,7 @@ exports.assignOrders = async (req, res) => {
   }
 };
 
-// POST /admin/reassign – reassign an entire assignment to a new driver
+// POST /admin/dashboard/reassign
 exports.reassignDriver = async (req, res) => {
   const { assignmentId, newDriverId } = req.body;
   if (!assignmentId || !newDriverId) {
@@ -210,21 +168,21 @@ exports.reassignDriver = async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Verify assignment exists and is not completed
     const assign = await client.query('SELECT * FROM assignments WHERE id = $1 AND status != $2', [assignmentId, 'completed']);
     if (assign.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND_OR_COMPLETED' } });
     }
 
-    // Verify new driver is available
-    const driver = await client.query('SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true', [newDriverId]);
+    const driver = await client.query(
+      'SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true',
+      [newDriverId]
+    );
     if (driver.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: { code: 'DRIVER_NOT_AVAILABLE' } });
     }
 
-    // Update assignment driver_id, set status back to pending_accept
     await client.query(
       'UPDATE assignments SET driver_id = $1, status = $2, accepted_at = NULL WHERE id = $3',
       [newDriverId, 'pending_accept', assignmentId]
@@ -240,7 +198,7 @@ exports.reassignDriver = async (req, res) => {
   }
 };
 
-// GET /admin/assignments/active – active deliveries
+// GET /admin/dashboard/assignments/active
 exports.getActiveAssignments = async (req, res) => {
   try {
     const result = await pool.query(
@@ -254,6 +212,25 @@ exports.getActiveAssignments = async (req, res) => {
        ORDER BY a.assigned_at DESC`
     );
     res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
+  }
+};
+
+// GET /admin/dashboard/drivers/locations  (NEW – for live map)
+exports.getDriverLocations = async (req, res) => {
+  try {
+    const locations = await pool.query(
+      `SELECT DISTINCT ON (d.user_id) d.user_id, u.full_name, dt.lat, dt.lng, dt.recorded_at,
+        d.vehicle_type, d.is_online,
+        (SELECT a.id FROM assignments a WHERE a.driver_id = d.user_id AND a.status IN ('accepted','in_progress') LIMIT 1) as active_assignment_id
+       FROM drivers d
+       JOIN users u ON d.user_id = u.id
+       LEFT JOIN driver_tracking_log dt ON d.user_id = dt.driver_id
+       WHERE d.is_online = true
+       ORDER BY d.user_id, dt.recorded_at DESC`
+    );
+    res.json({ success: true, data: locations.rows });
   } catch (err) {
     res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
   }
