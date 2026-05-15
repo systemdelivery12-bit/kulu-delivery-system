@@ -16,6 +16,9 @@ app.use('/api/v1/admin/products', adminProductRoutes);
 app.use('/api/v1/products', productRoutes);
 app.use('/api/v1/orders', orderRoutes);
 
+const adminDashboardRoutes = require('./routes/adminDashboard');
+// ...
+app.use('/api/v1/admin/dashboard', adminDashboardRoutes);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
