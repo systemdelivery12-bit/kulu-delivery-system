@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Kulu Delivery - Driver</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <link rel="manifest" href="driver-manifest.json">
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#f0f2f5; }
+    #login-overlay { position:fixed; top:0; left:0; width:100%; height:100%;
+      background:rgba(0,0,0,0.7); display:flex; justify-content:center;
+      align-items:center; z-index:9999; }
+    #login-box { background:white; padding:25px; border-radius:12px;
+      text-align:center; box-shadow:0 10px 40px rgba(0,0,0,0.3); width:90%; max-width:400px; }
+    #login-box h1 { color:#1a73e8; margin-bottom:10px; font-size:24px; }
+    #login-box input { padding:12px; width:100%; border:2px solid #ddd;
+      border-radius:8px; font-size:14px; margin:10px 0; }
+    #login-box button { padding:12px 30px; background:#1a73e8; color:white;
+      border:none; border-radius:8px; font-size:16px; cursor:pointer; width:100%; }
+    .error { color:#d93025; margin-top:10px; font-size:13px; }
+
+    #app { display:none; padding:15px; max-width:500px; margin:0 auto; }
+    .header { display:flex; justify-content:space-between; align-items:center;
+      background:white; padding:15px; border-radius:12px; margin-bottom:15px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+    .header h2 { font-size:18px; color:#1a73e8; }
+    .toggle { position:relative; display:inline-block; width:50px; height:26px; }
+    .toggle input { opacity:0; width:0; height:0; }
+    .slider { position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0;
+      background-color:#ccc; transition:.4s; border-radius:34px; }
+    .slider:before { position:absolute; content:""; height:20px; width:20px;
+      left:3px; bottom:3px; background-color:white; transition:.4s; border-radius:50%; }
+    input:checked + .slider { background-color:#1a73e8; }
+    input:checked + .slider:before { transform:translateX(24px); }
+    .logout-btn { background:#d93025; color:white; border:none; padding:8px 14px;
+      border-radius:6px; font-size:13px; cursor:pointer; }
+
+    .card { background:white; border-radius:12px; padding:15px; margin-bottom:12px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+    .assignment-header { display:flex; justify-content:space-between; align-items:center; }
+    .order-info { margin:8px 0; font-size:14px; }
+    .stops { margin-top:10px; }
+    .stop { background:#f1f3f4; border-radius:8px; padding:10px; margin-bottom:6px;
+      display:flex; justify-content:space-between; align-items:center; }
+    .stop-buttons button { margin-left:4px; padding:6px 10px; border:none; border-radius:4px;
+      font-size:12px; cursor:pointer; }
+    .btn-arrived { background:#fff3cd; color:#856404; }
+    .btn-picked { background:#cce5ff; color:#004085; }
+    .btn-delivered { background:#d4edda; color:#155724; }
+    .btn-disabled { background:#ccc; color:#666; cursor:not-allowed; }
+
+    .earnings { background:white; border-radius:12px; padding:15px; margin-top:15px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+    .earnings h3 { color:#1a73e8; margin-bottom:10px; }
+
+    .toast { position:fixed; bottom:20px; left:20px; right:20px; background:#333;
+      color:white; padding:12px; border-radius:8px; font-size:14px; z-index:10000;
+      text-align:center; display:none; }
+    .toast.success { background:#0f9d58; }
+    .toast.error { background:#d93025; }
+  </style>
+</head>
+<body>
+
+<div id="login-overlay">
+  <div id="login-box">
+    <h1>🛵 Kulu Driver</h1>
+    <p style="color:#666; margin-bottom:15px;">Sign in with your token</p>
+    <input type="text" id="token-input" placeholder="Driver JWT token">
+    <button onclick="login()">Start Driving</button>
+    <div class="error" id="login-error"></div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="header">
+    <div>
+      <h2 id="driver-name">Driver</h2>
+      <small id="driver-vehicle"></small>
+    </div>
+    <label class="toggle">
+      <input type="checkbox" id="online-toggle" onchange="toggleOnline(this.checked)">
+      <span class="slider"></span>
+    </label>
+    <button class="logout-btn" onclick="logout()">Logout</button>
+  </div>
+
+  <div id="assignments-container">
+    <h3 style="margin-bottom:10px;">📋 Active Deliveries</h3>
+    <div id="assignments-list">Loading...</div>
+  </div>
+
+  <div class="earnings">
+    <h3>💰 Today's Earnings</h3>
+    <div id="earnings-data">Loading...</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  let driverToken = '';
+  let driverInfo = null;
+  let socket;
+  let watchId = null;
+  let refreshInterval;
+
+  // ========== LOGIN ==========
+  function login() {
+    const token = document.getElementById('token-input').value.trim();
+    if (!token) { showLoginError('Enter token'); return; }
+    
+    fetch('/api/v1/auth/me', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.success || data.data.role !== 'driver') throw new Error('Not a driver');
+        driverToken = token;
+        driverInfo = data.data;
+        document.getElementById('login-overlay').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        document.getElementById('driver-name').textContent = driverInfo.full_name;
+        document.getElementById('driver-vehicle').textContent = driverInfo.profile?.vehicle_type || '';
+        
+        // Set online toggle according to current status
+        if (driverInfo.profile?.is_online) {
+          document.getElementById('online-toggle').checked = true;
+        }
+        
+        connectSocket();
+        startRefresh();
+        startGPSTracking();
+      })
+      .catch(err => showLoginError('Invalid driver token'));
+  }
+
+  function showLoginError(msg) {
+    document.getElementById('login-error').textContent = msg;
+  }
+
+  function logout() {
+    if (socket) socket.disconnect();
+    if (watchId) navigator.geolocation.clearWatch(watchId);
+    clearInterval(refreshInterval);
+    driverToken = '';
+    document.getElementById('login-overlay').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('token-input').value = '';
+  }
+
+  // ========== SOCKET.IO ==========
+  function connectSocket() {
+    socket = io('/', { auth: { token: driverToken } });
+    socket.on('connect', () => console.log('Socket connected'));
+    socket.on('newAssignment', () => {
+      showToast('New delivery assigned!', 'success');
+      fetchAssignments();
+    });
+    // Join driver's personal room (backend already does it)
+  }
+
+  // ========== TOGGLE ONLINE ==========
+  function toggleOnline(online) {
+    fetch('/api/v1/driver/status', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${driverToken}` },
+      body: JSON.stringify({ isOnline: online })
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        showToast(online ? 'You are online' : 'You are offline', 'success');
+      } else {
+        showToast('Failed to update status', 'error');
+        document.getElementById('online-toggle').checked = !online; // revert
+      }
+    });
+  }
+
+  // ========== REFRESH DATA ==========
+  function startRefresh() {
+    fetchAssignments();
+    fetchEarnings();
+    refreshInterval = setInterval(() => {
+      fetchAssignments();
+      fetchEarnings();
+    }, 15000);
+  }
+
+  function fetchAssignments() {
+    fetch('/api/v1/driver/assignments', {
+      headers: { 'Authorization': `Bearer ${driverToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      const container = document.getElementById('assignments-list');
+      if (!json.success || json.data.length === 0) {
+        container.innerHTML = '<p>No active deliveries</p>';
+        return;
+      }
+      container.innerHTML = json.data.map(assignment => renderAssignment(assignment)).join('');
+    });
+  }
+
+  function renderAssignment(assignment) {
+    const stopsHtml = assignment.stops.map(stop => renderStop(stop, assignment.id)).join('');
+    return `
+      <div class="card">
+        <div class="assignment-header">
+          <b>Assignment #${assignment.id}</b>
+          <span style="font-size:12px;">${assignment.status}</span>
+        </div>
+        <div class="order-info">
+          ${assignment.orders.map(o => `🛒 ${o.customer_name} - ${o.zone_name}`).join('<br>')}
+        </div>
+        <div class="order-info">
+          💵 Earnings: ${assignment.earnings} Birr
+        </div>
+        <div class="stops">${stopsHtml}</div>
+      </div>
+    `;
+  }
+
+  function renderStop(stop, assignmentId) {
+    const isCompleted = stop.status === 'delivered' || (stop.stopType === 'pickup' && stop.status === 'picked_up');
+    const isCurrent = !isCompleted && (stop.status === 'arrived' || stop.status === 'pending');
+    let buttons = '';
+    if (stop.stopType === 'pickup') {
+      if (stop.status === 'pending') {
+        buttons = `<button class="btn-arrived" onclick="updateStop(${stop.stopId},'arrived')">Arrived</button>`;
+      } else if (stop.status === 'arrived') {
+        buttons = `<button class="btn-picked" onclick="updateStop(${stop.stopId},'picked_up')">Picked Up</button>`;
+      } else if (stop.status === 'picked_up') {
+        buttons = '<span style="color:green;">✅ Done</span>';
+      }
+    } else if (stop.stopType === 'drop') {
+      if (stop.status === 'pending' || stop.status === 'arrived') {
+        buttons = `
+          <button class="btn-arrived" onclick="updateStop(${stop.stopId},'arrived')">Arrived</button>
+          <button class="btn-delivered" onclick="updateStop(${stop.stopId},'delivered')">Delivered</button>
+        `;
+      } else if (stop.status === 'delivered') {
+        buttons = '<span style="color:green;">✅ Delivered</span>';
+      }
+    } else {
+      buttons = `<span>${stop.status}</span>`;
+    }
+    return `
+      <div class="stop">
+        <div>
+          <strong>${stop.stopType === 'pickup' ? '📦 Pickup' : '📍 Drop'}</strong><br>
+          <small>Sequence ${stop.sequence} - Status: ${stop.status}</small>
+        </div>
+        <div class="stop-buttons">${buttons}</div>
+      </div>
+    `;
+  }
+
+  function updateStop(stopId, newStatus) {
+    fetch(`/api/v1/driver/stops/${stopId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${driverToken}` },
+      body: JSON.stringify({ status: newStatus })
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        showToast('Status updated', 'success');
+        fetchAssignments(); // refresh view
+        fetchEarnings();    // earnings may change after delivery
+      } else {
+        showToast(json.error?.message || 'Update failed', 'error');
+      }
+    });
+  }
+
+  function fetchEarnings() {
+    fetch('/api/v1/driver/earnings?period=today', {
+      headers: { 'Authorization': `Bearer ${driverToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      const container = document.getElementById('earnings-data');
+      if (json.success) {
+        container.innerHTML = `
+          <p>Total: <b>${json.data.totalEarnings} Birr</b></p>
+          <p>Trips: <b>${json.data.totalTrips}</b></p>
+        `;
+      }
+    });
+  }
+
+  // ========== GPS TRACKING ==========
+  function startGPSTracking() {
+    if (!navigator.geolocation) {
+      console.warn('Geolocation not available');
+      return;
+    }
+    watchId = navigator.geolocation.watchPosition(
+      position => {
+        const { latitude, longitude } = position.coords;
+        // Send location via HTTP (fallback if socket not used)
+        fetch('/api/v1/driver/location', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${driverToken}` },
+          body: JSON.stringify({ lat: latitude, lng: longitude })
+        }).catch(() => {});
+      },
+      error => console.error('GPS error:', error),
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+    );
+  }
+
+  function showToast(message, type) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.className = `toast ${type}`;
+    toast.style.display = 'block';
+    setTimeout(() => toast.style.display = 'none', 3000);
+  }
+</script>
+
+</body>
+</html>
