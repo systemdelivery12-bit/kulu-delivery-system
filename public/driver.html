@@ -51,6 +51,13 @@
     .btn-delivered { background:#d4edda; color:#155724; }
     .btn-disabled { background:#ccc; color:#666; cursor:not-allowed; }
 
+    .wallet-card { background:#fffbf0; border:1px solid #f0c040; }
+    .wallet-card .balance { font-size:20px; font-weight:bold; color:#1a73e8; }
+    .packages-list { margin-top:10px; }
+    .package-item { background:#f9f9f9; border-radius:8px; padding:10px; margin-bottom:8px; }
+    .buy-btn { background:#0f9d58; color:white; border:none; border-radius:6px;
+      padding:6px 12px; cursor:pointer; font-size:12px; margin-top:5px; }
+
     .earnings { background:white; border-radius:12px; padding:15px; margin-top:15px;
       box-shadow:0 2px 8px rgba(0,0,0,0.1); }
     .earnings h3 { color:#1a73e8; margin-bottom:10px; }
@@ -85,6 +92,17 @@
       <span class="slider"></span>
     </label>
     <button class="logout-btn" onclick="logout()">Logout</button>
+  </div>
+
+  <!-- WALLET CARD -->
+  <div class="card wallet-card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <div>
+        <strong>💰 Balance:</strong> <span class="balance" id="coin-balance">0</span> coins
+      </div>
+      <button class="buy-btn" onclick="showPackages()">Buy Coins</button>
+    </div>
+    <div id="packages-list" class="packages-list" style="display:none;"></div>
   </div>
 
   <div id="assignments-container">
@@ -123,7 +141,6 @@
         document.getElementById('driver-name').textContent = driverInfo.full_name;
         document.getElementById('driver-vehicle').textContent = driverInfo.profile?.vehicle_type || '';
         
-        // Set online toggle according to current status
         if (driverInfo.profile?.is_online) {
           document.getElementById('online-toggle').checked = true;
         }
@@ -131,6 +148,7 @@
         connectSocket();
         startRefresh();
         startGPSTracking();
+        fetchWallet(); // initial wallet load
       })
       .catch(err => showLoginError('Invalid driver token'));
   }
@@ -157,7 +175,6 @@
       showToast('New delivery assigned!', 'success');
       fetchAssignments();
     });
-    // Join driver's personal room (backend already does it)
   }
 
   // ========== TOGGLE ONLINE ==========
@@ -173,7 +190,7 @@
         showToast(online ? 'You are online' : 'You are offline', 'success');
       } else {
         showToast('Failed to update status', 'error');
-        document.getElementById('online-toggle').checked = !online; // revert
+        document.getElementById('online-toggle').checked = !online;
       }
     });
   }
@@ -182,9 +199,11 @@
   function startRefresh() {
     fetchAssignments();
     fetchEarnings();
+    fetchWallet();
     refreshInterval = setInterval(() => {
       fetchAssignments();
       fetchEarnings();
+      fetchWallet(); // keep balance fresh
     }, 15000);
   }
 
@@ -224,7 +243,6 @@
 
   function renderStop(stop, assignmentId) {
     const isCompleted = stop.status === 'delivered' || (stop.stopType === 'pickup' && stop.status === 'picked_up');
-    const isCurrent = !isCompleted && (stop.status === 'arrived' || stop.status === 'pending');
     let buttons = '';
     if (stop.stopType === 'pickup') {
       if (stop.status === 'pending') {
@@ -267,8 +285,9 @@
     .then(json => {
       if (json.success) {
         showToast('Status updated', 'success');
-        fetchAssignments(); // refresh view
-        fetchEarnings();    // earnings may change after delivery
+        fetchAssignments();
+        fetchEarnings();
+        fetchWallet(); // balance will change if delivery completed (deduction)
       } else {
         showToast(json.error?.message || 'Update failed', 'error');
       }
@@ -291,6 +310,65 @@
     });
   }
 
+  // ========== WALLET & COIN PURCHASE ==========
+  function fetchWallet() {
+    fetch('/api/v1/driver/wallet', {
+      headers: { 'Authorization': `Bearer ${driverToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        document.getElementById('coin-balance').textContent = parseFloat(json.data.balance).toFixed(2);
+      }
+    });
+  }
+
+  function showPackages() {
+    fetch('/api/v1/driver/coin-packages', {
+      headers: { 'Authorization': `Bearer ${driverToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      const list = document.getElementById('packages-list');
+      if (!json.success || json.data.length === 0) {
+        list.innerHTML = '<p>No packages available</p>';
+        list.style.display = 'block';
+        return;
+      }
+      list.style.display = 'block';
+      list.innerHTML = json.data.map(pkg => `
+        <div class="package-item">
+          <strong>${pkg.name}</strong> – ${pkg.coins} coins for ${pkg.price} Birr<br>
+          <input type="text" id="receipt-${pkg.id}" placeholder="Receipt image URL" style="width:100%; padding:6px; margin:5px 0;">
+          <button class="buy-btn" onclick="buyPackage(${pkg.id})">Purchase</button>
+        </div>
+      `).join('');
+    });
+  }
+
+  function buyPackage(pkgId) {
+    const receiptInput = document.getElementById(`receipt-${pkgId}`);
+    const receipt = receiptInput.value.trim();
+    if (!receipt) {
+      showToast('Please enter the receipt image URL', 'error');
+      return;
+    }
+    fetch(`/api/v1/driver/coin-packages/${pkgId}/purchase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${driverToken}` },
+      body: JSON.stringify({ receiptImage: receipt })
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        showToast('Purchase request submitted! Waiting admin approval.', 'success');
+        document.getElementById('packages-list').style.display = 'none';
+      } else {
+        showToast(json.error?.message || 'Purchase failed', 'error');
+      }
+    });
+  }
+
   // ========== GPS TRACKING ==========
   function startGPSTracking() {
     if (!navigator.geolocation) {
@@ -300,7 +378,6 @@
     watchId = navigator.geolocation.watchPosition(
       position => {
         const { latitude, longitude } = position.coords;
-        // Send location via HTTP (fallback if socket not used)
         fetch('/api/v1/driver/location', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${driverToken}` },
