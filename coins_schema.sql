@@ -20,7 +20,15 @@ CREATE TABLE coin_packages (
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT NOW()
 );
-
+CREATE TABLE coin_purchase_requests (
+    id SERIAL PRIMARY KEY,
+    driver_id INTEGER REFERENCES drivers(user_id),
+    package_id INTEGER REFERENCES coin_packages(id),
+    receipt_image VARCHAR(255),
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    created_at TIMESTAMP DEFAULT NOW(),
+    reviewed_at TIMESTAMP
+);
 -- Coin transactions (purchases, deductions, bonuses)
 CREATE TABLE coin_transactions (
     id SERIAL PRIMARY KEY,
