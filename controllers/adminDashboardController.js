@@ -1,7 +1,5 @@
-// controllers/adminDashboardController.js
 const pool = require('../db/pool');
 
-// GET /admin/dashboard/orders/pending
 exports.getPendingOrders = async (req, res) => {
   try {
     const result = await pool.query(
@@ -28,7 +26,6 @@ exports.getPendingOrders = async (req, res) => {
   }
 };
 
-// GET /admin/dashboard/drivers/online
 exports.getOnlineDrivers = async (req, res) => {
   try {
     const result = await pool.query(
@@ -44,7 +41,6 @@ exports.getOnlineDrivers = async (req, res) => {
   }
 };
 
-// POST /admin/dashboard/assign
 exports.assignOrders = async (req, res) => {
   const { driverId, orderIds } = req.body;
   if (!driverId || !orderIds || !orderIds.length) {
@@ -93,7 +89,6 @@ exports.assignOrders = async (req, res) => {
     const assignmentId = assignmentRes.rows[0].id;
 
     const shopIds = new Set();
-    // For MVP, we create a single drop per unique zone (handles different customers)
     const uniqueZones = new Map();
 
     for (const order of orders) {
@@ -113,12 +108,8 @@ exports.assignOrders = async (req, res) => {
       }
     }
 
-    // Build stops: pickups first (sorted by shop ID), then drops
     let seq = 1;
-    const shopRows = await client.query(
-      'SELECT id, name_tig, coordinates FROM shops WHERE id = ANY($1)',
-      [Array.from(shopIds)]
-    );
+    const shopRows = await client.query('SELECT id, name_tig, coordinates FROM shops WHERE id = ANY($1)', [Array.from(shopIds)]);
     shopRows.rows.sort((a, b) => a.id - b.id);
 
     for (const shop of shopRows.rows) {
@@ -145,10 +136,7 @@ exports.assignOrders = async (req, res) => {
     const fullAssignment = await pool.query('SELECT * FROM assignments WHERE id = $1', [assignmentId]);
     const stops = await pool.query('SELECT * FROM delivery_stops WHERE assignment_id = $1 ORDER BY sequence', [assignmentId]);
 
-    res.status(201).json({
-      success: true,
-      data: { assignment: fullAssignment.rows[0], stops: stops.rows }
-    });
+    res.status(201).json({ success: true, data: { assignment: fullAssignment.rows[0], stops: stops.rows } });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ success: false, error: { code: 'ASSIGN_FAIL', message: err.message } });
@@ -157,7 +145,6 @@ exports.assignOrders = async (req, res) => {
   }
 };
 
-// POST /admin/dashboard/reassign
 exports.reassignDriver = async (req, res) => {
   const { assignmentId, newDriverId } = req.body;
   if (!assignmentId || !newDriverId) {
@@ -174,10 +161,7 @@ exports.reassignDriver = async (req, res) => {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND_OR_COMPLETED' } });
     }
 
-    const driver = await client.query(
-      'SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true',
-      [newDriverId]
-    );
+    const driver = await client.query('SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true', [newDriverId]);
     if (driver.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: { code: 'DRIVER_NOT_AVAILABLE' } });
@@ -198,7 +182,6 @@ exports.reassignDriver = async (req, res) => {
   }
 };
 
-// GET /admin/dashboard/assignments/active
 exports.getActiveAssignments = async (req, res) => {
   try {
     const result = await pool.query(
@@ -217,7 +200,7 @@ exports.getActiveAssignments = async (req, res) => {
   }
 };
 
-// GET /admin/dashboard/drivers/locations  (NEW – for live map)
+// NEW – get latest locations of all online drivers for the live map
 exports.getDriverLocations = async (req, res) => {
   try {
     const locations = await pool.query(
