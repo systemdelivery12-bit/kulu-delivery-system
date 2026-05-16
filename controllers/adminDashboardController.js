@@ -1,6 +1,6 @@
-// controllers/adminDashboardController.js
 const pool = require('../db/pool');
 
+// ========== ORDERS ==========
 exports.getPendingOrders = async (req, res) => {
   try {
     const result = await pool.query(
@@ -27,13 +27,16 @@ exports.getPendingOrders = async (req, res) => {
   }
 };
 
+// ========== DRIVERS ==========
 exports.getOnlineDrivers = async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT d.*, u.full_name, u.phone,
-        (SELECT COUNT(*) FROM assignments a WHERE a.driver_id = d.user_id AND a.status IN ('accepted','in_progress')) as current_load
+        (SELECT COUNT(*) FROM assignments a WHERE a.driver_id = d.user_id AND a.status IN ('accepted','in_progress')) as current_load,
+        COALESCE(w.coin_balance, 0) as coin_balance
        FROM drivers d
        JOIN users u ON d.user_id = u.id
+       LEFT JOIN driver_wallets w ON d.user_id = w.driver_id
        WHERE d.is_online = true AND d.is_approved = true`
     );
     res.json({ success: true, data: result.rows });
@@ -42,6 +45,7 @@ exports.getOnlineDrivers = async (req, res) => {
   }
 };
 
+// ========== ASSIGNMENT ==========
 exports.assignOrders = async (req, res) => {
   const { driverId, orderIds } = req.body;
   if (!driverId || !orderIds || !orderIds.length) {
@@ -52,13 +56,21 @@ exports.assignOrders = async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Check driver approved, online, AND coin balance > 0
     const driver = await client.query(
-      'SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true',
+      `SELECT d.*, COALESCE(w.coin_balance, 0) as coin_balance
+       FROM drivers d
+       LEFT JOIN driver_wallets w ON d.user_id = w.driver_id
+       WHERE d.user_id = $1 AND d.is_approved = true AND d.is_online = true`,
       [driverId]
     );
     if (driver.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: { code: 'DRIVER_NOT_AVAILABLE' } });
+    }
+    if (parseFloat(driver.rows[0].coin_balance) <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: { code: 'NO_COINS', message: 'Driver has no coins' } });
     }
 
     const orders = [];
@@ -134,7 +146,6 @@ exports.assignOrders = async (req, res) => {
 
     await client.query('COMMIT');
 
-    // ===== NEW: Real‑time notification to the driver =====
     const io = req.app.get('io');
     io.to(`driver:${driverId}`).emit('newAssignment', { assignmentId });
 
@@ -166,10 +177,21 @@ exports.reassignDriver = async (req, res) => {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND_OR_COMPLETED' } });
     }
 
-    const driver = await client.query('SELECT * FROM drivers WHERE user_id = $1 AND is_approved = true AND is_online = true', [newDriverId]);
+    // Check new driver coins
+    const driver = await client.query(
+      `SELECT d.*, COALESCE(w.coin_balance,0) as coin_balance
+       FROM drivers d
+       LEFT JOIN driver_wallets w ON d.user_id = w.driver_id
+       WHERE d.user_id = $1 AND d.is_approved = true AND d.is_online = true`,
+      [newDriverId]
+    );
     if (driver.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: { code: 'DRIVER_NOT_AVAILABLE' } });
+    }
+    if (parseFloat(driver.rows[0].coin_balance) <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: { code: 'NO_COINS' } });
     }
 
     await client.query(
@@ -179,7 +201,6 @@ exports.reassignDriver = async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Notify the new driver of the reassigned assignment
     const io = req.app.get('io');
     io.to(`driver:${newDriverId}`).emit('newAssignment', { assignmentId });
 
@@ -210,7 +231,6 @@ exports.getActiveAssignments = async (req, res) => {
   }
 };
 
-// Get latest locations of all online drivers for the live map
 exports.getDriverLocations = async (req, res) => {
   try {
     const locations = await pool.query(
@@ -224,6 +244,95 @@ exports.getDriverLocations = async (req, res) => {
        ORDER BY d.user_id, dt.recorded_at DESC`
     );
     res.json({ success: true, data: locations.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
+  }
+};
+
+// ========== COIN PACKAGES (ADMIN) ==========
+exports.createCoinPackage = async (req, res) => {
+  const { name, coins, price } = req.body;
+  if (!name || !coins || !price) {
+    return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS' } });
+  }
+  try {
+    const result = await pool.query(
+      'INSERT INTO coin_packages (name, coins, price) VALUES ($1, $2, $3) RETURNING *',
+      [name, coins, price]
+    );
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'CREATE_FAIL', message: err.message } });
+  }
+};
+
+exports.getCoinPackages = async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM coin_packages WHERE is_active = true');
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
+  }
+};
+
+exports.updateCoinPackage = async (req, res) => {
+  const { id } = req.params;
+  const { name, coins, price, isActive } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE coin_packages SET name=$1, coins=$2, price=$3, is_active=$4 WHERE id=$5 RETURNING *',
+      [name, coins, price, isActive, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND' } });
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'UPDATE_FAIL', message: err.message } });
+  }
+};
+
+// Add bonus coins to a driver (admin)
+exports.addBonusCoins = async (req, res) => {
+  const { driverId } = req.params;
+  const { amount, note } = req.body; // amount in Birr (positive)
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ success: false, error: { code: 'INVALID_AMOUNT' } });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Upsert wallet
+    await client.query(
+      `INSERT INTO driver_wallets (driver_id, coin_balance) VALUES ($1, $2)
+       ON CONFLICT (driver_id) DO UPDATE SET coin_balance = driver_wallets.coin_balance + $2, updated_at = NOW()`,
+      [driverId, amount]
+    );
+
+    const balance = await client.query('SELECT coin_balance FROM driver_wallets WHERE driver_id = $1', [driverId]);
+    const newBalance = balance.rows[0].coin_balance;
+
+    await client.query(
+      'INSERT INTO coin_transactions (driver_id, type, amount, balance_after, note) VALUES ($1, $2, $3, $4, $5)',
+      [driverId, 'bonus', amount, newBalance, note || 'Admin bonus']
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: `Added ${amount} coins`, newBalance });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ success: false, error: { code: 'BONUS_FAIL', message: err.message } });
+  } finally {
+    client.release();
+  }
+};
+
+exports.getCoinTransactions = async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT ct.*, u.full_name as driver_name FROM coin_transactions ct JOIN users u ON ct.driver_id = u.id ORDER BY ct.created_at DESC LIMIT 100'
+    );
+    res.json({ success: true, data: result.rows });
   } catch (err) {
     res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
   }
