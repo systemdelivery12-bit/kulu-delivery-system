@@ -1,13 +1,8 @@
-// controllers/driverController.js
 const pool = require('../db/pool');
 
-// Utility: get driver ID from authenticated request
 const getDriverId = (req) => req.user.userId;
-
-// Helper to get Socket.io instance for real-time emissions
 const getIO = (req) => req.app.get('io');
 
-// PUT /driver/status  (toggle online/offline)
 exports.toggleOnline = async (req, res) => {
   const driverId = getDriverId(req);
   const { isOnline } = req.body;
@@ -22,7 +17,6 @@ exports.toggleOnline = async (req, res) => {
   }
 };
 
-// GET /driver/assignments  (active tasks)
 exports.getAssignments = async (req, res) => {
   const driverId = getDriverId(req);
   try {
@@ -40,7 +34,6 @@ exports.getAssignments = async (req, res) => {
       [driverId]
     );
 
-    // Enhance each assignment with order details and earnings
     for (let asgn of assignments.rows) {
       const orderIdsRes = await pool.query(
         `SELECT DISTINCT oi.order_id
@@ -51,7 +44,7 @@ exports.getAssignments = async (req, res) => {
       );
       const orderIds = orderIdsRes.rows.map(r => r.order_id);
       asgn.orderIds = orderIds;
-      
+
       if (orderIds.length > 0) {
         const ordersRes = await pool.query(
           `SELECT o.id, o.delivery_fee, o.total_amount, u.full_name as customer_name, z.name_tig as zone_name
@@ -75,11 +68,10 @@ exports.getAssignments = async (req, res) => {
   }
 };
 
-// PUT /driver/assignments/:id/respond  (accept or reject)
 exports.respondToAssignment = async (req, res) => {
   const driverId = getDriverId(req);
   const { id } = req.params;
-  const { response } = req.body; // 'accept' or 'reject'
+  const { response } = req.body;
 
   if (!response || !['accept', 'reject'].includes(response)) {
     return res.status(400).json({ success: false, error: { code: 'INVALID_RESPONSE' } });
@@ -103,9 +95,7 @@ exports.respondToAssignment = async (req, res) => {
       await client.query('COMMIT');
       return res.json({ success: true, message: 'Assignment accepted' });
     } else {
-      // Reject: revert assignment and orders
       await client.query('UPDATE assignments SET status = $1 WHERE id = $2', ['rejected', id]);
-      
       const orderIds = await client.query(
         `SELECT DISTINCT oi.order_id
          FROM assignment_items ai
@@ -127,11 +117,10 @@ exports.respondToAssignment = async (req, res) => {
   }
 };
 
-// PUT /driver/stops/:stopId/status
 exports.updateStopStatus = async (req, res) => {
   const driverId = getDriverId(req);
   const { stopId } = req.params;
-  const { status } = req.body; // 'arrived', 'picked_up', 'delivered'
+  const { status } = req.body;
 
   if (!status || !['arrived', 'picked_up', 'delivered'].includes(status)) {
     return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS' } });
@@ -159,21 +148,15 @@ exports.updateStopStatus = async (req, res) => {
 
     await client.query('UPDATE delivery_stops SET status = $1 WHERE id = $2', [status, stopId]);
 
-    // Move assignment to in_progress on first stop activity
     if (currentStop.assign_status === 'accepted' && (status === 'arrived' || status === 'picked_up')) {
       await client.query('UPDATE assignments SET status = $1 WHERE id = $2', ['in_progress', assignmentId]);
     }
 
-    // Check if last stop (max sequence) and delivered
-    const maxSeq = await client.query(
-      'SELECT MAX(sequence) as max_seq FROM delivery_stops WHERE assignment_id = $1',
-      [assignmentId]
-    );
+    const maxSeq = await client.query('SELECT MAX(sequence) as max_seq FROM delivery_stops WHERE assignment_id = $1', [assignmentId]);
     const isLastStop = currentStop.sequence === maxSeq.rows[0].max_seq;
 
     if (isLastStop && currentStop.stop_type === 'drop' && status === 'delivered') {
       await client.query('UPDATE assignments SET status = $1, completed_at = NOW() WHERE id = $2', ['completed', assignmentId]);
-      
       const orderIds = await client.query(
         `SELECT DISTINCT oi.order_id
          FROM assignment_items ai
@@ -184,8 +167,6 @@ exports.updateStopStatus = async (req, res) => {
       for (let row of orderIds.rows) {
         await client.query("UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = $1", [row.order_id]);
       }
-      
-      // Increase total deliveries count
       await client.query('UPDATE drivers SET total_deliveries = total_deliveries + 1 WHERE user_id = $1', [driverId]);
     }
 
@@ -199,7 +180,6 @@ exports.updateStopStatus = async (req, res) => {
   }
 };
 
-// POST /driver/location  (GPS ping – also emits via Socket.io)
 exports.sendLocation = async (req, res) => {
   const driverId = getDriverId(req);
   const { lat, lng, assignmentId } = req.body;
@@ -208,13 +188,11 @@ exports.sendLocation = async (req, res) => {
   }
 
   try {
-    // Save to database
     await pool.query(
       'INSERT INTO driver_tracking_log (driver_id, assignment_id, lat, lng) VALUES ($1, $2, $3, $4)',
       [driverId, assignmentId || null, lat, lng]
     );
 
-    // Emit real-time event
     const io = getIO(req);
     let orderIds = [];
     if (assignmentId) {
@@ -228,7 +206,6 @@ exports.sendLocation = async (req, res) => {
       orderIds = orders.rows.map(r => r.order_id);
     }
 
-    // Admin room
     io.to('admin:all').emit('driver:locationUpdate', {
       driverId,
       lat,
@@ -237,7 +214,6 @@ exports.sendLocation = async (req, res) => {
       timestamp: new Date()
     });
 
-    // Customer rooms
     orderIds.forEach(orderId => {
       io.to(`order:${orderId}`).emit('driver:locationUpdate', {
         driverId,
@@ -254,10 +230,9 @@ exports.sendLocation = async (req, res) => {
   }
 };
 
-// GET /driver/earnings
 exports.getEarnings = async (req, res) => {
   const driverId = getDriverId(req);
-  const { period } = req.query; // today, week, month
+  const { period } = req.query;
 
   try {
     let dateFilter = '';
