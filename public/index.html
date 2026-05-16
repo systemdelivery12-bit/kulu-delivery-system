@@ -76,9 +76,16 @@
     .assign-btn {
       padding: 6px 14px; background: #1a73e8; color: white; border: none;
       border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: bold;
+      margin-left: 5px;
     }
     .assign-btn:hover { background: #1557b0; }
     .assign-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+    .bonus-btn {
+      padding: 6px 10px; background: #0f9d58; color: white; border: none;
+      border-radius: 6px; cursor: pointer; font-size: 11px; margin-left: 5px;
+    }
+    .bonus-btn:hover { background: #0b7d45; }
 
     .active-item {
       background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px;
@@ -155,7 +162,6 @@
     const token = document.getElementById('token-input').value.trim();
     if (!token) { showError('Please enter a token'); return; }
     
-    // Verify token by fetching pending orders
     fetch('/api/v1/admin/dashboard/orders/pending', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
@@ -171,7 +177,6 @@
         initMap();
         connectSocket();
         refreshAll();
-        // Auto-refresh every 30 seconds
         setInterval(refreshAll, 30000);
       } else {
         showError('Authentication failed');
@@ -256,10 +261,10 @@
 
   function selectOrder(orderId) {
     selectedOrderId = orderId;
-    fetchPendingOrders(); // re-render to show selection
+    fetchPendingOrders();
   }
 
-  // ========== ONLINE DRIVERS ==========
+  // ========== ONLINE DRIVERS (with coin balance & bonus) ==========
   function fetchOnlineDrivers() {
     fetch('/api/v1/admin/dashboard/drivers/online', {
       headers: { 'Authorization': `Bearer ${adminToken}` }
@@ -271,17 +276,54 @@
         container.innerHTML = '<p style="color:#888;">No drivers online</p>';
         return;
       }
-      container.innerHTML = json.data.map(driver => `
-        <div class="driver-card">
-          <div class="driver-info">
-            <div class="driver-name">${driver.vehicle_type === 'motorcycle' ? '🏍️' : driver.vehicle_type === 'car' ? '🚗' : driver.vehicle_type === 'bicycle' ? '🚲' : '🚶'} ${driver.full_name}</div>
-            <div class="driver-details">Load: ${driver.current_load}/${driver.max_orders} | ID: ${driver.user_id}</div>
+      container.innerHTML = json.data.map(driver => {
+        const vehicleIcon = driver.vehicle_type === 'motorcycle' ? '🏍️' :
+                            driver.vehicle_type === 'car' ? '🚗' :
+                            driver.vehicle_type === 'bicycle' ? '🚲' : '🚶';
+        const coinBalance = parseFloat(driver.coin_balance || 0).toFixed(2);
+        const noCoins = coinBalance <= 0;
+        const assignDisabled = !selectedOrderId || noCoins;
+        return `
+          <div class="driver-card">
+            <div class="driver-info">
+              <div class="driver-name">${vehicleIcon} ${driver.full_name}</div>
+              <div class="driver-details">
+                Load: ${driver.current_load}/${driver.max_orders} | Coins: <b style="color:${noCoins ? 'red' : 'green'}">${coinBalance}</b>
+              </div>
+            </div>
+            <button class="assign-btn" onclick="assignToDriver(${driver.user_id})" ${assignDisabled ? 'disabled' : ''}>
+              ${noCoins ? 'No Coins' : 'Assign'}
+            </button>
+            <button class="bonus-btn" onclick="addBonus(${driver.user_id})" title="Give free coins">🎁 Bonus</button>
           </div>
-          <button class="assign-btn" onclick="assignToDriver(${driver.user_id})" ${!selectedOrderId ? 'disabled' : ''}>
-            Assign
-          </button>
-        </div>
-      `).join('');
+        `;
+      }).join('');
+    });
+  }
+
+  // ========== ADD BONUS COINS ==========
+  function addBonus(driverId) {
+    const amount = prompt('Enter bonus amount (Birr):', '100');
+    if (!amount || isNaN(amount) || parseFloat(amount) <= 0) {
+      showToast('Please enter a valid positive number', 'error');
+      return;
+    }
+    fetch(`/api/v1/admin/dashboard/drivers/${driverId}/bonus`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({ amount: parseFloat(amount), note: 'Admin bonus' })
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        showToast(`Added ${amount} coins. New balance: ${json.newBalance}`, 'success');
+        fetchOnlineDrivers(); // refresh
+      } else {
+        showToast(json.error?.message || 'Bonus failed', 'error');
+      }
     });
   }
 
@@ -336,7 +378,7 @@
     });
   }
 
-  // ========== DRIVER LOCATIONS (initial map load) ==========
+  // ========== DRIVER LOCATIONS ==========
   function fetchDriverLocations() {
     fetch('/api/v1/admin/dashboard/drivers/locations', {
       headers: { 'Authorization': `Bearer ${adminToken}` }
