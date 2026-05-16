@@ -13,7 +13,7 @@ router.post('/assign', dashboardCtrl.assignOrders);
 router.post('/reassign', dashboardCtrl.reassignDriver);
 router.get('/assignments/active', dashboardCtrl.getActiveAssignments);
 
-// Coin packages management
+// Coin packages
 router.post('/coin-packages', dashboardCtrl.createCoinPackage);
 router.get('/coin-packages', dashboardCtrl.getCoinPackages);
 router.put('/coin-packages/:id', dashboardCtrl.updateCoinPackage);
@@ -21,7 +21,12 @@ router.put('/coin-packages/:id', dashboardCtrl.updateCoinPackage);
 // Bonus coins to driver
 router.post('/drivers/:driverId/bonus', dashboardCtrl.addBonusCoins);
 
-// Coin transactions history (all)
+// Coin purchase requests (admin approval)
+router.get('/coin-purchase-requests', dashboardCtrl.getPurchaseRequests);
+router.post('/coin-purchase-requests/:requestId/approve', dashboardCtrl.approvePurchaseRequest);
+router.post('/coin-purchase-requests/:requestId/reject', dashboardCtrl.rejectPurchaseRequest);
+
+// Transactions history
 router.get('/coin-transactions', dashboardCtrl.getCoinTransactions);
 
 module.exports = router;
