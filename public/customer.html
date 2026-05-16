@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Kulu Delivery - Shop & Track</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#f5f5f5; }
+    .screen { display:none; padding:10px; max-width:600px; margin:0 auto; }
+    .active { display:block; }
+
+    /* Login */
+    #login-screen { text-align:center; padding-top:50px; }
+    #login-screen h1 { color:#1a73e8; margin-bottom:10px; }
+    #login-screen input { padding:12px; width:80%; max-width:300px; border:2px solid #ddd;
+      border-radius:8px; font-size:16px; margin:8px 0; }
+    #login-screen button { padding:12px 30px; background:#1a73e8; color:white; border:none;
+      border-radius:8px; font-size:16px; cursor:pointer; width:80%; max-width:300px; margin-top:5px; }
+    .error { color:#d93025; margin-top:8px; }
+
+    /* Header */
+    .header { display:flex; justify-content:space-between; align-items:center;
+      background:white; padding:12px 15px; border-radius:10px; margin-bottom:10px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.08); }
+    .header h2 { font-size:18px; color:#1a73e8; }
+
+    /* Categories */
+    .categories { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:15px; }
+    .cat-btn { flex:1 0 auto; padding:10px; background:white; border:1px solid #ddd;
+      border-radius:20px; text-align:center; font-size:13px; cursor:pointer; }
+    .cat-btn.active { background:#1a73e8; color:white; border-color:#1a73e8; }
+
+    /* Products */
+    .product-list { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .product-card { background:white; border-radius:12px; padding:10px; box-shadow:0 2px 6px rgba(0,0,0,0.08); }
+    .product-card .name { font-weight:bold; font-size:14px; }
+    .product-card .shop { color:#666; font-size:12px; }
+    .product-card .price { color:#1a73e8; font-weight:bold; margin:4px 0; }
+    .product-card .add-btn { background:#1a73e8; color:white; border:none; border-radius:6px;
+      padding:6px 12px; font-size:12px; cursor:pointer; width:100%; }
+
+    /* Cart, Checkout, Tracking, History */
+    .cart-item { background:white; border-radius:8px; padding:12px; margin-bottom:8px; box-shadow:0 1px 4px rgba(0,0,0,0.08); }
+    .section-title { font-size:16px; font-weight:bold; margin:15px 0 8px; }
+    .total-row { display:flex; justify-content:space-between; font-weight:bold; margin-top:5px; }
+
+    .zone-select, .payment-options { margin:10px 0; }
+    .payment-options label { display:block; margin-bottom:5px; }
+
+    /* Buttons */
+    .primary-btn { background:#1a73e8; color:white; border:none; padding:12px; border-radius:8px;
+      font-size:16px; cursor:pointer; width:100%; margin-top:10px; }
+    .secondary-btn { background:#ddd; color:#333; border:none; padding:10px; border-radius:6px; cursor:pointer; }
+
+    #map { height:200px; width:100%; border-radius:8px; margin:10px 0; }
+
+    .status-timeline { margin:10px 0; }
+    .status-item { display:flex; align-items:center; margin-bottom:8px; }
+    .status-icon { width:24px; height:24px; border-radius:50%; background:#ccc; display:flex;
+      justify-content:center; align-items:center; margin-right:10px; font-size:12px; color:white; }
+    .status-icon.done { background:#0f9d58; }
+
+    .bottom-nav { display:flex; justify-content:space-around; background:white; padding:10px 0;
+      position:fixed; bottom:0; left:0; right:0; box-shadow:0 -2px 8px rgba(0,0,0,0.1); }
+    .nav-item { text-align:center; font-size:12px; cursor:pointer; color:#666; }
+    .nav-item.active { color:#1a73e8; font-weight:bold; }
+
+    .toast { position:fixed; bottom:70px; left:20px; right:20px; background:#333; color:white;
+      padding:12px; border-radius:8px; font-size:14px; z-index:10000; text-align:center; display:none; }
+    .toast.success { background:#0f9d58; }
+    .toast.error { background:#d93025; }
+  </style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen" class="screen active">
+  <h1>🛵 Kulu Delivery</h1>
+  <p style="color:#666; margin-bottom:20px;">Everything, delivered to your door</p>
+  <input type="tel" id="phone-input" placeholder="Phone number (e.g. 0911222333)">
+  <button onclick="requestOTP()">Request OTP</button>
+  <div id="otp-section" style="display:none;">
+    <input type="text" id="otp-input" placeholder="Enter OTP">
+    <button onclick="verifyOTP()">Login</button>
+  </div>
+  <div class="error" id="login-error"></div>
+</div>
+
+<!-- MAIN APP -->
+<div id="main-app" class="screen">
+  <div class="header">
+    <h2 id="greeting">Welcome!</h2>
+    <button class="secondary-btn" onclick="logout()">Logout</button>
+  </div>
+
+  <!-- HOME PAGE -->
+  <div id="home-page">
+    <div class="categories" id="categories"></div>
+    <input type="text" id="search-box" placeholder="Search products..." style="width:100%;padding:10px;border-radius:8px;border:1px solid #ddd;margin-bottom:10px;" oninput="filterProducts()">
+    <div class="product-list" id="product-list">Loading...</div>
+  </div>
+
+  <!-- CART PAGE -->
+  <div id="cart-page" style="display:none;">
+    <h3 class="section-title">🛒 My Cart</h3>
+    <div id="cart-items"></div>
+    <div id="cart-estimate"></div>
+    <button class="primary-btn" onclick="goToCheckout()">Proceed to Checkout</button>
+  </div>
+
+  <!-- CHECKOUT PAGE -->
+  <div id="checkout-page" style="display:none;">
+    <h3 class="section-title">📋 Checkout</h3>
+    <div class="zone-select">
+      <label>Delivery Zone:</label>
+      <select id="zone-select" style="width:100%;padding:10px;border-radius:8px;"></select>
+    </div>
+    <div class="payment-options">
+      <label><input type="radio" name="payment" value="cod" checked> Cash on Delivery</label>
+      <label><input type="radio" name="payment" value="telebirr"> Telebirr</label>
+      <label><input type="radio" name="payment" value="cbe_bank"> CBE Bank Transfer</label>
+      <label><input type="radio" name="payment" value="mpesa"> M-Pesa</label>
+      <label><input type="radio" name="payment" value="ebirr"> E-Birr</label>
+    </div>
+    <textarea id="order-note" placeholder="Note for driver (optional)" style="width:100%;padding:10px;border-radius:8px;border:1px solid #ddd;"></textarea>
+    <button class="primary-btn" onclick="placeOrder()">Place Order</button>
+    <p id="checkout-total" style="font-weight:bold; margin-top:10px;"></p>
+  </div>
+
+  <!-- ORDER CONFIRMATION -->
+  <div id="confirmation-page" style="display:none;">
+    <h3 class="section-title">✅ Order Placed!</h3>
+    <p>Your order ID: <b id="conf-order-id"></b></p>
+    <button class="primary-btn" onclick="trackOrder(document.getElementById('conf-order-id').textContent)">Track Order</button>
+  </div>
+
+  <!-- TRACKING PAGE -->
+  <div id="tracking-page" style="display:none;">
+    <h3 class="section-title">📍 Live Tracking</h3>
+    <div id="map"></div>
+    <div id="tracking-info">Loading...</div>
+    <button class="secondary-btn" onclick="goToHome()">Back to Shopping</button>
+  </div>
+
+  <!-- HISTORY PAGE -->
+  <div id="history-page" style="display:none;">
+    <h3 class="section-title">📦 Order History</h3>
+    <div id="history-list">Loading...</div>
+  </div>
+
+  <!-- BOTTOM NAV -->
+  <div class="bottom-nav">
+    <div class="nav-item active" onclick="showPage('home')">🏠 Home</div>
+    <div class="nav-item" onclick="showPage('cart')">🛒 Cart (<span id="cart-count">0</span>)</div>
+    <div class="nav-item" onclick="showPage('history')">📦 Orders</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // ========== STATE ==========
+  let token = localStorage.getItem('kulu_token') || '';
+  let user = JSON.parse(localStorage.getItem('kulu_user') || 'null');
+  let cart = JSON.parse(localStorage.getItem('kulu_cart') || '[]');
+  let zones = [];
+  let currentPage = 'home';
+  let trackingMap = null;
+  let trackingMarker = null;
+  let socket = null;
+  let selectedCategory = '';
+
+  // ========== LOGIN ==========
+  async function requestOTP() {
+    const phone = document.getElementById('phone-input').value.trim();
+    if (!phone) return showLoginError('Enter phone number');
+    try {
+      const res = await fetch('/api/v1/auth/request-otp', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({phone})
+      });
+      const data = await res.json();
+      if (data.success) {
+        document.getElementById('otp-section').style.display = 'block';
+        showToast('OTP sent! Check console (dev mode) or SMS', 'success');
+      } else {
+        showLoginError(data.error?.message || 'Failed');
+      }
+    } catch(e) { showLoginError('Network error'); }
+  }
+
+  async function verifyOTP() {
+    const phone = document.getElementById('phone-input').value.trim();
+    const otp = document.getElementById('otp-input').value.trim();
+    if (!otp) return showLoginError('Enter OTP');
+    try {
+      const res = await fetch('/api/v1/auth/verify-otp', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({phone, otp})
+      });
+      const data = await res.json();
+      if (data.success) {
+        token = data.data.token;
+        user = data.data.user;
+        localStorage.setItem('kulu_token', token);
+        localStorage.setItem('kulu_user', JSON.stringify(user));
+        document.getElementById('login-screen').classList.remove('active');
+        document.getElementById('main-app').classList.add('active');
+        document.getElementById('greeting').textContent = `Hi, ${user.fullName || 'Customer'}`;
+        initApp();
+      } else {
+        showLoginError(data.error?.message || 'Invalid OTP');
+      }
+    } catch(e) { showLoginError('Network error'); }
+  }
+
+  function showLoginError(msg) { document.getElementById('login-error').textContent = msg; }
+  function logout() {
+    localStorage.clear();
+    token = ''; user = null; cart = [];
+    if (socket) socket.disconnect();
+    document.getElementById('main-app').classList.remove('active');
+    document.getElementById('login-screen').classList.add('active');
+    document.getElementById('phone-input').value = '';
+    document.getElementById('otp-input').value = '';
+    document.getElementById('otp-section').style.display = 'none';
+  }
+
+  // ========== INIT ==========
+  if (token && user) {
+    document.getElementById('login-screen').classList.remove('active');
+    document.getElementById('main-app').classList.add('active');
+    document.getElementById('greeting').textContent = `Hi, ${user.fullName || 'Customer'}`;
+    initApp();
+  }
+
+  async function initApp() {
+    await fetchZones();
+    await fetchCategories();
+    await fetchProducts();
+    connectSocket();
+    updateCartCount();
+    showPage('home');
+  }
+
+  // ========== SOCKET (for tracking) ==========
+  function connectSocket() {
+    if (socket) socket.disconnect();
+    socket = io('/', { auth: { token } });
+    socket.on('connect', () => console.log('Customer socket connected'));
+  }
+
+  // ========== ZONES ==========
+  async function fetchZones() {
+    const res = await fetch('/api/v1/zones');
+    const data = await res.json();
+    if (data.success) {
+      zones = data.data;
+      const sel = document.getElementById('zone-select');
+      sel.innerHTML = zones.map(z => `<option value="${z.id}">${z.name_tig}</option>`).join('');
+    }
+  }
+
+  // ========== CATEGORIES ==========
+  async function fetchCategories() {
+    const res = await fetch('/api/v1/categories');
+    const data = await res.json();
+    const container = document.getElementById('categories');
+    if (data.success && data.data.length) {
+      container.innerHTML = `<span class="cat-btn ${selectedCategory===''?'active':''}" onclick="selectCategory('')">All</span>` +
+        data.data.map(c => `<span class="cat-btn ${selectedCategory===c.id?'active':''}" onclick="selectCategory('${c.id}')">${c.name_tig}</span>`).join('');
+    } else {
+      // Fallback categories if none in DB
+      container.innerHTML = `
+        <span class="cat-btn active" onclick="selectCategory('')">All</span>
+        <span class="cat-btn" onclick="selectCategory('restaurant')">🍔 Food</span>
+        <span class="cat-btn" onclick="selectCategory('pharmacy')">💊 Pharmacy</span>
+        <span class="cat-btn" onclick="selectCategory('electronics')">📱 Electronics</span>
+        <span class="cat-btn" onclick="selectCategory('boutique')">👗 Boutique</span>
+        <span class="cat-btn" onclick="selectCategory('fresh_food')">🍎 Fresh</span>
+      `;
+    }
+  }
+
+  function selectCategory(catId) {
+    selectedCategory = catId;
+    fetchCategories(); // refresh active state
+    fetchProducts();
+  }
+
+  // ========== PRODUCTS ==========
+  async function fetchProducts() {
+    const search = document.getElementById('search-box')?.value || '';
+    let url = `/api/v1/products?limit=50`;
+    if (selectedCategory) url += `&category=${selectedCategory}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const container = document.getElementById('product-list');
+    if (!data.success || !data.data.length) {
+      container.innerHTML = '<p>No products found</p>';
+      return;
+    }
+    container.innerHTML = data.data.map(p => `
+      <div class="product-card">
+        <div class="name">${p.name_tig}</div>
+        <div class="shop">${p.shop_name}</div>
+        <div class="price">${p.price} Birr</div>
+        <button class="add-btn" onclick="addToCart(${p.id}, '${p.name_tig.replace(/'/g, "\\'")}', ${p.price}, ${p.shop_id}, '${p.shop_name.replace(/'/g, "\\'")}')">Add to Cart</button>
+      </div>
+    `).join('');
+  }
+
+  function filterProducts() { fetchProducts(); }
+
+  // ========== CART ==========
+  function addToCart(productId, name, price, shopId, shopName) {
+    const existing = cart.find(item => item.productId === productId);
+    if (existing) {
+      existing.quantity++;
+    } else {
+      cart.push({ productId, name, price, shopId, shopName, quantity: 1 });
+    }
+    localStorage.setItem('kulu_cart', JSON.stringify(cart));
+    updateCartCount();
+    showToast(`${name} added to cart`, 'success');
+  }
+
+  function updateCartCount() {
+    const count = cart.reduce((sum, item) => sum + item.quantity, 0);
+    document.getElementById('cart-count').textContent = count;
+  }
+
+  function renderCart() {
+    const container = document.getElementById('cart-items');
+    if (cart.length === 0) {
+      container.innerHTML = '<p>Your cart is empty</p>';
+      document.getElementById('cart-estimate').innerHTML = '';
+      return;
+    }
+    container.innerHTML = cart.map((item, idx) => `
+      <div class="cart-item">
+        <b>${item.name}</b> (${item.shopName})<br>
+        ${item.price} Birr x ${item.quantity} = ${item.price * item.quantity} Birr
+        <button class="secondary-btn" style="float:right" onclick="removeFromCart(${idx})">Remove</button>
+      </div>
+    `).join('');
+
+    // Estimate delivery fee
+    estimateDelivery();
+  }
+
+  function removeFromCart(idx) {
+    cart.splice(idx, 1);
+    localStorage.setItem('kulu_cart', JSON.stringify(cart));
+    updateCartCount();
+    renderCart();
+  }
+
+  async function estimateDelivery() {
+    if (cart.length === 0) return;
+    const zoneId = document.getElementById('zone-select').value || zones[0]?.id;
+    const items = cart.map(item => ({ productId: item.productId, quantity: item.quantity }));
+    try {
+      const res = await fetch('/api/v1/orders/estimate', {
+        method: 'POST', headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ items, deliveryZoneId: zoneId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        document.getElementById('cart-estimate').innerHTML = `
+          <div class="total-row"><span>Items:</span><span>${data.data.itemTotal} Birr</span></div>
+          <div class="total-row"><span>Delivery:</span><span>${data.data.deliveryFee} Birr</span></div>
+          <div class="total-row" style="color:#1a73e8;"><span>Total:</span><span>${data.data.total} Birr</span></div>
+        `;
+      }
+    } catch(e) { console.error(e); }
+  }
+
+  // ========== CHECKOUT ==========
+  function goToCheckout() {
+    if (cart.length === 0) return showToast('Cart is empty', 'error');
+    showPage('checkout');
+    estimateDelivery(); // show total on checkout
+  }
+
+  async function placeOrder() {
+    const zoneId = document.getElementById('zone-select').value;
+    const paymentMethod = document.querySelector('input[name="payment"]:checked').value;
+    const note = document.getElementById('order-note').value;
+    const items = cart.map(item => ({ productId: item.productId, quantity: item.quantity }));
+    try {
+      const res = await fetch('/api/v1/orders', {
+        method: 'POST', headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ items, deliveryZoneId: zoneId, paymentMethod, note })
+      });
+      const data = await res.json();
+      if (data.success) {
+        cart = [];
+        localStorage.setItem('kulu_cart', '[]');
+        updateCartCount();
+        document.getElementById('conf-order-id').textContent = data.data.orderId;
+        showPage('confirmation');
+      } else {
+        showToast(data.error?.message || 'Order failed', 'error');
+      }
+    } catch(e) { showToast('Network error', 'error'); }
+  }
+
+  function trackOrder(orderId) {
+    showPage('tracking');
+    loadTracking(orderId);
+  }
+
+  async function loadTracking(orderId) {
+    try {
+      const res = await fetch(`/api/v1/orders/${orderId}/tracking`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!data.success) return;
+      const { driver, stops, latestLocation } = data.data;
+      // Display info
+      let html = '';
+      if (driver) {
+        html += `<p>🛵 ${driver.full_name} (${driver.vehicle_type})</p>`;
+        if (latestLocation) {
+          initTrackingMap(latestLocation.lat, latestLocation.lng);
+        }
+      } else {
+        html += '<p>Waiting for driver assignment...</p>';
+      }
+      if (stops && stops.length) {
+        html += '<div class="status-timeline">';
+        stops.forEach(stop => {
+          const done = stop.status === 'delivered' || (stop.stop_type==='pickup' && stop.status==='picked_up');
+          html += `<div class="status-item"><span class="status-icon ${done?'done':''}">${done?'✓':'○'}</span>${stop.stop_type==='pickup'?'Pickup':'Drop'}: ${stop.status}</div>`;
+        });
+        html += '</div>';
+      }
+      document.getElementById('tracking-info').innerHTML = html;
+
+      // Subscribe to socket updates
+      if (socket) {
+        socket.emit('subscribe:order', orderId);
+        socket.off('driver:locationUpdate').on('driver:locationUpdate', (pos) => {
+          if (pos.lat && pos.lng && trackingMap) {
+            if (trackingMarker) trackingMarker.setLatLng([pos.lat, pos.lng]);
+            else trackingMarker = L.marker([pos.lat, pos.lng]).addTo(trackingMap);
+            trackingMap.setView([pos.lat, pos.lng], 15);
+          }
+        });
+      }
+    } catch(e) { console.error(e); }
+  }
+
+  function initTrackingMap(lat, lng) {
+    if (trackingMap) {
+      trackingMap.setView([lat, lng], 15);
+      if (trackingMarker) trackingMarker.setLatLng([lat, lng]);
+      return;
+    }
+    trackingMap = L.map('map').setView([lat, lng], 15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: 'Map data &copy; OpenStreetMap'
+    }).addTo(trackingMap);
+    trackingMarker = L.marker([lat, lng]).addTo(trackingMap).bindPopup('Driver');
+  }
+
+  // ========== HISTORY ==========
+  async function fetchHistory() {
+    try {
+      const res = await fetch('/api/v1/orders', { headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      const container = document.getElementById('history-list');
+      if (!data.success || !data.data.length) {
+        container.innerHTML = '<p>No orders yet</p>';
+        return;
+      }
+      container.innerHTML = data.data.map(order => `
+        <div class="cart-item">
+          <b>Order #${order.id}</b> - ${order.status}<br>
+          Total: ${order.total_amount} Birr<br>
+          <button class="secondary-btn" onclick="trackOrder(${order.id})">Track</button>
+        </div>
+      `).join('');
+    } catch(e) { console.error(e); }
+  }
+
+  // ========== PAGE NAVIGATION ==========
+  function showPage(page) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); // not needed for inner pages
+    document.getElementById('home-page').style.display = page==='home' ? 'block' : 'none';
+    document.getElementById('cart-page').style.display = page==='cart' ? 'block' : 'none';
+    document.getElementById('checkout-page').style.display = page==='checkout' ? 'block' : 'none';
+    document.getElementById('confirmation-page').style.display = page==='confirmation' ? 'block' : 'none';
+    document.getElementById('tracking-page').style.display = page==='tracking' ? 'block' : 'none';
+    document.getElementById('history-page').style.display = page==='history' ? 'block' : 'none';
+    currentPage = page;
+    // Update nav active
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+    if (page==='home') document.querySelector('.nav-item:nth-child(1)').classList.add('active');
+    else if (page==='cart' || page==='checkout' || page==='confirmation') document.querySelector('.nav-item:nth-child(2)').classList.add('active');
+    else if (page==='history' || page==='tracking') document.querySelector('.nav-item:nth-child(3)').classList.add('active');
+
+    if (page === 'cart') renderCart();
+    if (page === 'history') fetchHistory();
+    if (page === 'home') fetchProducts();
+  }
+
+  function goToHome() { showPage('home'); }
+
+  // ========== TOAST ==========
+  function showToast(message, type) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.className = `toast ${type}`;
+    toast.style.display = 'block';
+    setTimeout(() => toast.style.display = 'none', 3000);
+  }
+</script>
+</body>
+</html>
