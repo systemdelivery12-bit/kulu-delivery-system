@@ -1,3 +1,4 @@
+// controllers/adminDashboardController.js
 const pool = require('../db/pool');
 
 exports.getPendingOrders = async (req, res) => {
@@ -133,6 +134,10 @@ exports.assignOrders = async (req, res) => {
 
     await client.query('COMMIT');
 
+    // ===== NEW: Real‑time notification to the driver =====
+    const io = req.app.get('io');
+    io.to(`driver:${driverId}`).emit('newAssignment', { assignmentId });
+
     const fullAssignment = await pool.query('SELECT * FROM assignments WHERE id = $1', [assignmentId]);
     const stops = await pool.query('SELECT * FROM delivery_stops WHERE assignment_id = $1 ORDER BY sequence', [assignmentId]);
 
@@ -173,6 +178,11 @@ exports.reassignDriver = async (req, res) => {
     );
 
     await client.query('COMMIT');
+
+    // Notify the new driver of the reassigned assignment
+    const io = req.app.get('io');
+    io.to(`driver:${newDriverId}`).emit('newAssignment', { assignmentId });
+
     res.json({ success: true, message: 'Assignment reassigned' });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -200,7 +210,7 @@ exports.getActiveAssignments = async (req, res) => {
   }
 };
 
-// NEW – get latest locations of all online drivers for the live map
+// Get latest locations of all online drivers for the live map
 exports.getDriverLocations = async (req, res) => {
   try {
     const locations = await pool.query(
