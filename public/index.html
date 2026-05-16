@@ -2,76 +2,366 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Kulu Delivery - Admin Live Map</title>
+  <title>Kulu Delivery - Admin Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <style>
-    body { margin:0; padding:0; font-family: sans-serif; }
-    #map { height: 100vh; width: 100%; }
-    #login { position: absolute; top:10px; left:10px; z-index:1000; background:white; padding:10px; border-radius:5px; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; }
+    
+    #login-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.7); display: flex; justify-content: center;
+      align-items: center; z-index: 9999;
+    }
+    #login-box {
+      background: white; padding: 30px; border-radius: 12px;
+      text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+    }
+    #login-box h1 { color: #1a73e8; margin-bottom: 10px; font-size: 28px; }
+    #login-box input { padding: 12px; width: 350px; border: 2px solid #ddd;
+      border-radius: 8px; font-size: 14px; margin: 10px 0; }
+    #login-box button { padding: 12px 30px; background: #1a73e8; color: white;
+      border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+    #login-box button:hover { background: #1557b0; }
+    .error { color: #d93025; margin-top: 10px; font-size: 13px; }
+
+    #app { display: none; height: 100vh; }
+    
+    .header {
+      background: #1a73e8; color: white; padding: 15px 25px;
+      display: flex; justify-content: space-between; align-items: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    .header h1 { font-size: 22px; }
+    .header button { padding: 8px 20px; background: white; color: #1a73e8;
+      border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+
+    .main-content { display: flex; height: calc(100vh - 60px); }
+    
+    .left-panel {
+      width: 380px; background: white; overflow-y: auto;
+      border-right: 1px solid #ddd; padding: 15px;
+    }
+    .right-panel { flex: 1; position: relative; }
+    #map { width: 100%; height: 100%; }
+
+    .section-title {
+      font-size: 16px; font-weight: bold; color: #333;
+      margin: 15px 0 10px; padding-bottom: 8px; border-bottom: 2px solid #1a73e8;
+    }
+    .card {
+      background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 12px; margin-bottom: 10px; font-size: 13px;
+    }
+    .card:hover { background: #e8f0fe; border-color: #1a73e8; }
+    .card.selected { background: #d2e3fc; border: 2px solid #1a73e8; }
+    .card .order-id { font-weight: bold; color: #1a73e8; }
+    .card .customer { color: #555; }
+    .card .items { color: #777; font-size: 12px; margin-top: 4px; }
+    .card .zone { color: #888; font-size: 11px; }
+    .card .total { font-weight: bold; color: #333; margin-top: 4px; }
+
+    .driver-card {
+      display: flex; justify-content: space-between; align-items: center;
+      background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 10px 12px; margin-bottom: 8px; font-size: 13px;
+    }
+    .driver-card:hover { background: #e8f0fe; }
+    .driver-info { flex: 1; }
+    .driver-name { font-weight: bold; }
+    .driver-details { font-size: 11px; color: #777; }
+    .assign-btn {
+      padding: 6px 14px; background: #1a73e8; color: white; border: none;
+      border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: bold;
+    }
+    .assign-btn:hover { background: #1557b0; }
+    .assign-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+    .active-item {
+      background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px;
+      padding: 10px; margin-bottom: 8px; font-size: 12px;
+    }
+    .status-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 11px; font-weight: bold;
+    }
+    .status-accepted { background: #fff3cd; color: #856404; }
+    .status-in_progress { background: #cce5ff; color: #004085; }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px; background: #333; color: white;
+      padding: 12px 20px; border-radius: 8px; font-size: 14px; z-index: 10000;
+      display: none;
+    }
+    .toast.success { background: #0f9d58; }
+    .toast.error { background: #d93025; }
   </style>
 </head>
 <body>
-  <div id="map"></div>
-  <div id="login">
-    <input type="text" id="token" placeholder="Admin JWT token" size="40">
-    <button onclick="connect()">Connect</button>
+
+<!-- LOGIN OVERLAY -->
+<div id="login-overlay">
+  <div id="login-box">
+    <h1>🛵 Kulu Delivery</h1>
+    <p style="color:#666; margin-bottom:15px;">Admin Dashboard</p>
+    <input type="text" id="token-input" placeholder="Paste your Admin JWT token">
+    <br>
+    <button onclick="login()">Enter Dashboard</button>
+    <div class="error" id="login-error"></div>
   </div>
+</div>
 
-  <script>
-    const map = L.map('map').setView([13.49, 39.47], 13);
+<!-- MAIN APP -->
+<div id="app">
+  <div class="header">
+    <h1>📋 Kulu Delivery - Admin Panel</h1>
+    <button onclick="logout()">Logout</button>
+  </div>
+  <div class="main-content">
+    <!-- LEFT PANEL -->
+    <div class="left-panel">
+      <div class="section-title">📦 Pending Orders</div>
+      <div id="pending-orders">Loading...</div>
+
+      <div class="section-title">🛵 Online Drivers</div>
+      <div id="online-drivers">Loading...</div>
+
+      <div class="section-title">🚀 Active Deliveries</div>
+      <div id="active-assignments">Loading...</div>
+    </div>
+
+    <!-- RIGHT PANEL (MAP) -->
+    <div class="right-panel">
+      <div id="map"></div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+  let adminToken = '';
+  let selectedOrderId = null;
+  let map;
+  const driversMarkers = {};
+  let socket;
+
+  // ========== AUTH ==========
+  function login() {
+    const token = document.getElementById('token-input').value.trim();
+    if (!token) { showError('Please enter a token'); return; }
+    
+    // Verify token by fetching pending orders
+    fetch('/api/v1/admin/dashboard/orders/pending', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    .then(res => {
+      if (!res.ok) throw new Error('Invalid token or not admin');
+      return res.json();
+    })
+    .then(data => {
+      if (data.success) {
+        adminToken = token;
+        document.getElementById('login-overlay').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        initMap();
+        connectSocket();
+        refreshAll();
+        // Auto-refresh every 30 seconds
+        setInterval(refreshAll, 30000);
+      } else {
+        showError('Authentication failed');
+      }
+    })
+    .catch(err => showError('Invalid admin token'));
+  }
+
+  function showError(msg) {
+    document.getElementById('login-error').textContent = msg;
+  }
+
+  function logout() {
+    if (socket) socket.disconnect();
+    adminToken = '';
+    selectedOrderId = null;
+    document.getElementById('login-overlay').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('token-input').value = '';
+  }
+
+  // ========== MAP ==========
+  function initMap() {
+    map = L.map('map').setView([13.49, 39.47], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: 'Map data &copy; OpenStreetMap contributors'
+      attribution: 'Map data &copy; OpenStreetMap'
     }).addTo(map);
+  }
 
-    const driversMarkers = {};
+  // ========== SOCKET.IO ==========
+  function connectSocket() {
+    socket = io('/', { auth: { token: adminToken } });
+    socket.on('connect', () => console.log('Socket connected'));
+    socket.on('driver:locationUpdate', (data) => {
+      updateDriverMarker(data.driverId, data.lat, data.lng, `Driver #${data.driverId}`, 'unknown');
+    });
+  }
 
-    function connect() {
-      const token = document.getElementById('token').value;
-      if (!token) return alert('Enter admin token');
+  function updateDriverMarker(driverId, lat, lng, name, vehicleType) {
+    if (driversMarkers[driverId]) {
+      driversMarkers[driverId].setLatLng([lat, lng]);
+    } else {
+      const icon = vehicleType === 'motorcycle' ? '🏍️' : vehicleType === 'car' ? '🚗' : vehicleType === 'bicycle' ? '🚲' : '🚶';
+      const marker = L.marker([lat, lng]).addTo(map).bindPopup(`<b>${name}</b><br>${vehicleType}`);
+      driversMarkers[driverId] = marker;
+    }
+  }
 
-      const socket = io('/', { auth: { token } });
+  // ========== REFRESH ALL DATA ==========
+  function refreshAll() {
+    fetchPendingOrders();
+    fetchOnlineDrivers();
+    fetchActiveAssignments();
+    fetchDriverLocations();
+  }
 
-      socket.on('connect', () => {
-        console.log('Connected as admin');
-        fetch('/api/v1/admin/dashboard/drivers/locations', {
-          headers: { 'Authorization': `Bearer ${token}` }
-        })
-        .then(res => res.json())
-        .then(json => {
-          if (json.success) {
-            json.data.forEach(driver => {
-              if (driver.lat && driver.lng) {
-                updateOrAddMarker(driver.user_id, driver.lat, driver.lng, driver.full_name, driver.vehicle_type);
-              }
-            });
+  // ========== PENDING ORDERS ==========
+  function fetchPendingOrders() {
+    fetch('/api/v1/admin/dashboard/orders/pending', {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      const container = document.getElementById('pending-orders');
+      if (!json.success || json.data.length === 0) {
+        container.innerHTML = '<p style="color:#888;">No pending orders</p>';
+        return;
+      }
+      container.innerHTML = json.data.map(order => `
+        <div class="card ${order.id === selectedOrderId ? 'selected' : ''}" 
+             onclick="selectOrder(${order.id})">
+          <div class="order-id">#${order.id}</div>
+          <div class="customer">👤 ${order.customer_id}</div>
+          <div class="zone">📍 ${order.zone_name}</div>
+          <div class="items">${order.items.map(i => i.product_name).join(', ')}</div>
+          <div class="total">💰 ${order.total_amount} Birr</div>
+          <div style="font-size:11px; color:#888;">💳 ${order.payment_method}</div>
+        </div>
+      `).join('');
+    });
+  }
+
+  function selectOrder(orderId) {
+    selectedOrderId = orderId;
+    fetchPendingOrders(); // re-render to show selection
+  }
+
+  // ========== ONLINE DRIVERS ==========
+  function fetchOnlineDrivers() {
+    fetch('/api/v1/admin/dashboard/drivers/online', {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      const container = document.getElementById('online-drivers');
+      if (!json.success || json.data.length === 0) {
+        container.innerHTML = '<p style="color:#888;">No drivers online</p>';
+        return;
+      }
+      container.innerHTML = json.data.map(driver => `
+        <div class="driver-card">
+          <div class="driver-info">
+            <div class="driver-name">${driver.vehicle_type === 'motorcycle' ? '🏍️' : driver.vehicle_type === 'car' ? '🚗' : driver.vehicle_type === 'bicycle' ? '🚲' : '🚶'} ${driver.full_name}</div>
+            <div class="driver-details">Load: ${driver.current_load}/${driver.max_orders} | ID: ${driver.user_id}</div>
+          </div>
+          <button class="assign-btn" onclick="assignToDriver(${driver.user_id})" ${!selectedOrderId ? 'disabled' : ''}>
+            Assign
+          </button>
+        </div>
+      `).join('');
+    });
+  }
+
+  // ========== ASSIGN ==========
+  function assignToDriver(driverId) {
+    if (!selectedOrderId) {
+      showToast('Please select an order first', 'error');
+      return;
+    }
+    fetch('/api/v1/admin/dashboard/assign', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({ driverId, orderIds: [selectedOrderId] })
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        showToast('Order assigned successfully!', 'success');
+        selectedOrderId = null;
+        refreshAll();
+      } else {
+        showToast(json.error?.message || 'Assignment failed', 'error');
+      }
+    });
+  }
+
+  // ========== ACTIVE ASSIGNMENTS ==========
+  function fetchActiveAssignments() {
+    fetch('/api/v1/admin/dashboard/assignments/active', {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      const container = document.getElementById('active-assignments');
+      if (!json.success || json.data.length === 0) {
+        container.innerHTML = '<p style="color:#888;">No active deliveries</p>';
+        return;
+      }
+      container.innerHTML = json.data.map(a => {
+        const statusClass = a.status === 'accepted' ? 'status-accepted' : 'status-in_progress';
+        return `
+          <div class="active-item">
+            <span class="status-badge ${statusClass}">${a.status}</span>
+            <b>${a.driver_name}</b> (${a.vehicle_type})<br>
+            Assignment #${a.id} | Stops: ${a.stops?.length || 0}
+          </div>
+        `;
+      }).join('');
+    });
+  }
+
+  // ========== DRIVER LOCATIONS (initial map load) ==========
+  function fetchDriverLocations() {
+    fetch('/api/v1/admin/dashboard/drivers/locations', {
+      headers: { 'Authorization': `Bearer ${adminToken}` }
+    })
+    .then(r => r.json())
+    .then(json => {
+      if (json.success) {
+        json.data.forEach(d => {
+          if (d.lat && d.lng) {
+            updateDriverMarker(d.user_id, d.lat, d.lng, d.full_name, d.vehicle_type);
           }
         });
-      });
-
-      socket.on('driver:locationUpdate', (data) => {
-        const { driverId, lat, lng } = data;
-        if (driversMarkers[driverId]) {
-          driversMarkers[driverId].setLatLng([lat, lng]);
-        } else {
-          updateOrAddMarker(driverId, lat, lng, `Driver ${driverId}`, 'unknown');
-        }
-      });
-
-      function updateOrAddMarker(driverId, lat, lng, name, vehicleType) {
-        if (driversMarkers[driverId]) {
-          driversMarkers[driverId].setLatLng([lat, lng]);
-        } else {
-          const icon = vehicleType === 'motorcycle' ? '🏍️' : vehicleType === 'car' ? '🚗' : vehicleType === 'bicycle' ? '🚲' : '🚶';
-          const marker = L.marker([lat, lng])
-            .addTo(map)
-            .bindPopup(`<b>${name}</b><br>${vehicleType}`);
-          driversMarkers[driverId] = marker;
-        }
       }
-    }
-  </script>
+    });
+  }
+
+  // ========== TOAST ==========
+  function showToast(message, type) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.className = `toast ${type}`;
+    toast.style.display = 'block';
+    setTimeout(() => toast.style.display = 'none', 3000);
+  }
+</script>
+
 </body>
 </html>
