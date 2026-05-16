@@ -337,3 +337,83 @@ exports.getCoinTransactions = async (req, res) => {
     res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
   }
 };
+// ========== COIN PURCHASE REQUESTS ==========
+exports.getPurchaseRequests = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT cpr.*, u.full_name as driver_name, cp.name as package_name, cp.coins, cp.price
+       FROM coin_purchase_requests cpr
+       JOIN users u ON cpr.driver_id = u.id
+       JOIN coin_packages cp ON cpr.package_id = cp.id
+       WHERE cpr.status = 'pending'
+       ORDER BY cpr.created_at ASC`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'FETCH_FAIL', message: err.message } });
+  }
+};
+
+exports.approvePurchaseRequest = async (req, res) => {
+  const { requestId } = req.params;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const request = await client.query(
+      'SELECT * FROM coin_purchase_requests WHERE id = $1 AND status = $2',
+      [requestId, 'pending']
+    );
+    if (request.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+    const reqData = request.rows[0];
+
+    // Get package coins
+    const pkg = await client.query('SELECT * FROM coin_packages WHERE id = $1', [reqData.package_id]);
+    if (pkg.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: { code: 'PACKAGE_NOT_FOUND' } });
+    }
+    const coins = parseFloat(pkg.rows[0].coins);
+
+    // Add to wallet
+    await client.query(
+      `INSERT INTO driver_wallets (driver_id, coin_balance) VALUES ($1, $2)
+       ON CONFLICT (driver_id) DO UPDATE SET coin_balance = driver_wallets.coin_balance + $2, updated_at = NOW()`,
+      [reqData.driver_id, coins]
+    );
+
+    const balRes = await client.query('SELECT coin_balance FROM driver_wallets WHERE driver_id = $1', [reqData.driver_id]);
+    const newBalance = balRes.rows[0].coin_balance;
+
+    // Log transaction
+    await client.query(
+      'INSERT INTO coin_transactions (driver_id, type, amount, balance_after, reference_id, note) VALUES ($1, $2, $3, $4, $5, $6)',
+      [reqData.driver_id, 'purchase', coins, newBalance, requestId, `Package: ${pkg.rows[0].name}`]
+    );
+
+    // Mark request approved
+    await client.query('UPDATE coin_purchase_requests SET status = $1, reviewed_at = NOW() WHERE id = $2', ['approved', requestId]);
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: `Approved, ${coins} coins added` });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ success: false, error: { code: 'APPROVE_FAIL', message: err.message } });
+  } finally {
+    client.release();
+  }
+};
+
+exports.rejectPurchaseRequest = async (req, res) => {
+  const { requestId } = req.params;
+  try {
+    await pool.query('UPDATE coin_purchase_requests SET status = $1, reviewed_at = NOW() WHERE id = $2 AND status = $3',
+      ['rejected', requestId, 'pending']);
+    res.json({ success: true, message: 'Purchase request rejected' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'REJECT_FAIL', message: err.message } });
+  }
+};
