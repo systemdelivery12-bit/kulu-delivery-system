@@ -21,12 +21,12 @@
   </div>
 
   <script>
-    const map = L.map('map').setView([13.49, 39.47], 13); // Mekelle center
+    const map = L.map('map').setView([13.49, 39.47], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: 'Map data &copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    const driversMarkers = {}; // driverId -> marker
+    const driversMarkers = {};
 
     function connect() {
       const token = document.getElementById('token').value;
@@ -36,7 +36,6 @@
 
       socket.on('connect', () => {
         console.log('Connected as admin');
-        // Fetch initial driver locations
         fetch('/api/v1/admin/dashboard/drivers/locations', {
           headers: { 'Authorization': `Bearer ${token}` }
         })
@@ -52,10 +51,8 @@
         });
       });
 
-      // Listen for live updates
       socket.on('driver:locationUpdate', (data) => {
         const { driverId, lat, lng } = data;
-        // For simplicity, we just update the marker (name from initial fetch, but we could store names)
         if (driversMarkers[driverId]) {
           driversMarkers[driverId].setLatLng([lat, lng]);
         } else {
